@@ -1,0 +1,32 @@
+# Optional: run the broker plus two demo CLI agents in containers.
+#   docker compose -f setup/docker-compose.yml up --build
+# Then follow the logs to see alpha <-> beta message exchange.
+services:
+  broker:
+    build:
+      context: ..
+      dockerfile: broker/Dockerfile
+    ports:
+      - "19121:19121"
+    volumes:
+      - ../broker/data:/app/data
+    command: ["node", "src/index.js", "--config", "/app/config.yaml"]
+
+  # Demo agents (replace with your own workloads):
+  alpha:
+    image: node:20-alpine
+    depends_on: [broker]
+    working_dir: /app
+    volumes:
+      - ../:/app
+    entrypoint: ["node", "adapters/cli/relay.mjs"]
+    command: ["watch", "--agent", "alpha", "--broker", "http://broker:19121", "--secret", "${RELAY_SECRET:?set RELAY_SECRET in .env}"]
+
+  beta:
+    image: node:20-alpine
+    depends_on: [broker]
+    working_dir: /app
+    volumes:
+      - ../:/app
+    entrypoint: ["node", "adapters/cli/relay.mjs"]
+    command: ["watch", "--agent", "beta", "--broker", "http://broker:19121", "--secret", "${RELAY_SECRET:?set RELAY_SECRET in .env}"]

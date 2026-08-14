@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run tests (node --test)
+        run: node --test
+
+  secrets:
+    name: Secrets scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  license:
+    name: License check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: LICENSE file present and MIT
+        run: |
+          test -f LICENSE || { echo "LICENSE missing"; exit 1; }
+          grep -qi "MIT License" LICENSE || { echo "LICENSE is not MIT"; exit 1; }
+
+  lockfile:
+    name: Dependency lock check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: npm lockfiles committed (when dependencies exist)
+        run: |
+          if [ -f package.json ]; then
+            node -e "const p=require('./package.json'); if(p.dependencies||p.devDependencies){if(!require('fs').existsSync('package-lock.json')&&!require('fs').existsSync('pnpm-lock.yaml')){console.error('lockfile missing');process.exit(1)}}"
+          fi

@@ -1,0 +1,4 @@
+# dsh-agent-relay bundle patch: joins the profile layer stack on install.
+- insert:
+    - id: dsh-agent-relay
+      name: 'dsh-agent-relay'

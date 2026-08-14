@@ -1,0 +1,33 @@
+# Secrets — never commit
+broker/config.yaml
+*.secret
+.env
+.env.*
+
+# Runtime data
+broker/data/
+logs/
+sessions/
+*.bak*
+*.tmp
+*.log
+
+# Probe/tooling files
+.dsh-*
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+*.tgz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+Thumbs.db
+.DS_Store

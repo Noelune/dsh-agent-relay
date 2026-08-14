@@ -1,0 +1,59 @@
+{
+  "name": "dsh-agent-relay",
+  "version": "0.1.0",
+  "description": "Multi-agent collaboration relay for DeepSeek Harness — send and receive messages between local agents (dsh, Codex, Claude, Hermes, OpenClaw, …) through a small loopback-first broker with HMAC auth. Ships the broker, the dsh plugin, a CLI client and a Python client. · DSH 多 Agent 协作中继：本地 Agent 之间经轻量 broker 安全互发消息。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client-ui.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "relay",
+    "agent",
+    "collaboration",
+    "multi-agent"
+  ],
+  "author": "Noelune",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Noelune/dsh-agent-relay.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  }
+}
