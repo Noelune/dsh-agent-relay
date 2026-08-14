@@ -14,6 +14,7 @@ import { existsSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { loadConfig, normalizeConfig } from '../broker/src/config.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(here, '..')
@@ -79,18 +80,28 @@ function runStart() {
 
 async function runSelfcheck() {
   const problems = []
+  // Resolve the broker URL from config so a custom host/port is checked
+  // exactly like the broker itself would bind (reusing the broker's loader
+  // keeps this in sync with src/config.js — a config that passes here will
+  // also boot the broker, and vice versa).
+  let brokerUrl = 'http://127.0.0.1:19121/'
   if (!existsSync(CONFIG_PATH)) {
     problems.push('broker/config.yaml missing — run "node setup/setup.js init"')
   } else {
-    const raw = readFileSync(CONFIG_PATH, 'utf8')
-    if (!/secret:\s*[0-9a-f]{16,}/.test(raw)) problems.push('broker.secret looks weak or unset')
+    try {
+      const cfg = normalizeConfig(loadConfig(CONFIG_PATH))
+      brokerUrl = `http://${cfg.host}:${cfg.port}/`
+      if (!/^[0-9a-f]{16,}$/.test(cfg.secret)) problems.push('broker.secret looks weak or unset')
+    } catch (e) {
+      problems.push(`broker/config.yaml invalid: ${e.message}`)
+    }
   }
   let brokerInfo = null
   try {
-    const res = await fetch('http://127.0.0.1:19121/', { signal: AbortSignal.timeout(3000) })
+    const res = await fetch(brokerUrl, { signal: AbortSignal.timeout(3000) })
     brokerInfo = await res.json()
   } catch {
-    problems.push('broker not reachable at http://127.0.0.1:19121 (start it with "node setup/setup.js start")')
+    problems.push(`broker not reachable at ${brokerUrl} (start it with "node setup/setup.js start")`)
   }
   if (brokerInfo && brokerInfo.protocol !== '1.0') {
     problems.push(`broker protocol mismatch: ${brokerInfo.protocol ?? 'unknown'}`)

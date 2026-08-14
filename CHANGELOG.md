@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.1] — 2026-08-15
+
+### Fixed
+
+- **`setup.js selfcheck` now reads host/port from `broker/config.yaml`** (reusing
+  the broker's own config loader) instead of hard-coding `127.0.0.1:19121` —
+  a custom port no longer produces a false "broker not reachable" failure.
+
 ## [0.1.0] — 2026-08-14
 
 ### Added
