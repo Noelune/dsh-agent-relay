@@ -12,8 +12,14 @@ import {
   PROTOCOL_VERSION as V2_VERSION,
   SIGNATURE_HEADERS as V2_HEADERS,
   MAX_CLOCK_SKEW_SECONDS as V2_SKEW,
+  MAX_BODY_CHARS as V2_MAX_BODY,
+  EXECUTION_MODES as V2_MODES,
+  TTL_MIN_SECONDS as V2_TTL_MIN,
+  TTL_MAX_SECONDS as V2_TTL_MAX,
+  RelayMessage,
   verifySignature as verifyV2Signature,
 } from './protocol.js'
+import { createV2Store } from './store-v2.js'
 
 const require = createRequire(import.meta.url)
 
@@ -120,8 +126,9 @@ function readBody(req) {
  * @param {object} deps.config - normalized broker config
  * @param {object} deps.store - message store
  * @param {object} deps.auth - authenticator
+ * @param {object} [deps.storeV2] - transitional v2 message store (Phase 1)
  */
-export function createBrokerServer({ config, store, auth }) {
+export function createBrokerServer({ config, store, auth, storeV2 = createV2Store({ dataDir: config.dataDir, persist: config.persist }) }) {
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
@@ -340,6 +347,97 @@ export function createBrokerServer({ config, store, auth }) {
           to: typeof parsed.to === 'string' ? parsed.to : undefined,
         })
         sendJson(res, 200, { messages, count: messages.length })
+        return
+      }
+
+      // ---- v2 message creation (docs/PROTOCOL-V2.md) ----
+
+      if (req.method === 'POST' && path === '/v1/messages') {
+        const parsed = parseJsonObject(rawBody)
+        if (!parsed) {
+          sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+          return
+        }
+        const origin = String(parsed.origin || '').trim().toLowerCase()
+        const target = String(parsed.target || '').trim().toLowerCase()
+        const kind = String(parsed.kind || '').trim().toLowerCase()
+        const body = String(parsed.body || '').trim()
+        const sessionRef = String(parsed.session_ref || '').slice(0, 300)
+        const idempotencyKey = String(parsed.idempotency_key || '').trim().slice(0, 120)
+        const parentId = parsed.parent_id ? String(parsed.parent_id).trim() : null
+        const executionMode = String(parsed.execution_mode || 'read').trim().toLowerCase()
+        if (origin !== agent) {
+          sendJson(res, 403, errorBody('forbidden', 'origin does not match authenticated agent'))
+          return
+        }
+        if (kind !== 'request' && kind !== 'reply') {
+          sendJson(res, 400, errorBody('bad_request', 'invalid message kind'))
+          return
+        }
+        if (!body || body.length > V2_MAX_BODY || !idempotencyKey) {
+          sendJson(res, 400, errorBody('bad_request', 'message body or idempotency key is invalid'))
+          return
+        }
+        const now = Date.now() / 1000
+        const requestedTtl = Number(parsed.ttl_seconds) || 3600
+        const ttl = Math.max(V2_TTL_MIN, Math.min(requestedTtl, V2_TTL_MAX))
+        const topic = String(parsed.topic || '').slice(0, 200)
+        let rootId = parsed.root_id ? String(parsed.root_id) : null
+        let sessionRefFinal = sessionRef
+        let executionModeFinal = executionMode
+        let topicFinal = topic
+        if (kind === 'request') {
+          if (!V2_MODES.includes(executionMode)) {
+            sendJson(res, 400, errorBody('bad_request', 'execution_mode must be read, continue, or write'))
+            return
+          }
+          if (executionMode === 'write') {
+            // Phase 1: workspace isolation / write lease not built yet — refuse.
+            sendJson(res, 403, errorBody('forbidden', 'write mode is not enabled yet'))
+            return
+          }
+          const allowed = config.agents?.[origin]?.allowedTargets
+          if (allowed && !allowed.includes(target)) {
+            sendJson(res, 403, errorBody('forbidden', `target is not allowed for ${executionMode} mode`))
+            return
+          }
+          rootId = rootId ?? cryptoRandomHex()
+        } else {
+          if (!parentId) {
+            sendJson(res, 400, errorBody('bad_request', 'reply requires parent_id'))
+            return
+          }
+          const parent = storeV2.get(parentId)
+          if (!parent) {
+            sendJson(res, 404, errorBody('no_such_message', 'parent relay message was not found'))
+            return
+          }
+          if (parent.target !== origin || parent.origin !== target) {
+            sendJson(res, 403, errorBody('forbidden', 'reply is not authorized for this message'))
+            return
+          }
+          rootId = parent.root_id
+          sessionRefFinal = parent.session_ref
+          executionModeFinal = parent.execution_mode
+          topicFinal = parent.topic
+        }
+        const message = new RelayMessage({
+          message_id: cryptoRandomHex(),
+          root_id: rootId,
+          parent_id: parentId,
+          origin,
+          target,
+          kind,
+          body,
+          session_ref: sessionRefFinal,
+          created_at: now,
+          expires_at: now + ttl,
+          execution_mode: executionModeFinal,
+          context: String(parsed.context || '').slice(0, V2_MAX_BODY),
+          topic: topicFinal,
+        })
+        const { message_id, created } = storeV2.create(message, idempotencyKey)
+        sendJson(res, 200, { message_id, created, protocol_version: V2_VERSION })
         return
       }
 
