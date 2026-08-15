@@ -40,12 +40,36 @@ function quoteString(str) {
   return out + '"'
 }
 
-/** Serialize a number the way Python json.dumps does (integral floats get .0). */
+/**
+ * Serialize a number the way Python json.dumps does. Note: JS cannot represent
+ * `1.0` as distinct from `1` (Number.isInteger(1.0) is true), so an integral
+ * float would serialize as `1` here, not Python's `1.0`. The v2 wire payloads
+ * clients sign never contain floats (created_at/expires_at are broker-assigned
+ * and not signed), so this is a documented non-issue; non-integral floats get
+ * the Python-style `.0`/shortest-repr treatment.
+ */
 function quoteNumber(value) {
   if (Number.isInteger(value)) return String(value)
   if (!Number.isFinite(value)) return value === Infinity ? 'Infinity' : value === -Infinity ? '-Infinity' : 'NaN'
   const text = String(value)
   return /[.eE]/.test(text) ? text : `${text}.0`
+}
+
+/**
+ * Number of Unicode code points in a string — Python's `len()` semantics.
+ * JS `.length` counts UTF-16 code units, so an emoji (a surrogate pair) would
+ * otherwise count as 2 and a CJK-heavy limit would diverge from the self-use
+ * broker.
+ */
+export function codePointLength(str) {
+  return Array.from(String(str ?? '')).length
+}
+
+/** Truncate a string to at most `max` code points without splitting a surrogate pair. */
+export function truncateCodePoints(str, max) {
+  const text = String(str ?? '')
+  const chars = Array.from(text)
+  return chars.length <= max ? text : chars.slice(0, max).join('')
 }
 
 /** Recursive JSON serializer: sorted keys, compact separators, raw UTF-8. */

@@ -21,7 +21,7 @@ before(async () => {
     host: '127.0.0.1', port: 0, secret: SHARED, tls: false,
     rateLimitLoopback: 100000, rateLimitRemote: 100000, messageTtlDays: 7,
     persist: false, dataDir: DATA_DIR, lockAfterFailures: 5, lockMinutes: 5,
-    agents: { [AGENT]: { secret: SHARED, allowedTargets: ['peer'] } },
+    agents: { [AGENT]: { allowedTargets: ['peer'] } },
   }
   const store = createStore({ ttlDays: 7, persist: false, dataDir: DATA_DIR })
   const auth = createAuthenticator({ secret: SHARED, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 100000, rateLimitRemote: 100000 })
@@ -143,4 +143,39 @@ test('a valid reply to an existing parent inherits root/session/mode/topic', asy
   assert.equal(stored.session_ref, parent.session_ref)
   assert.equal(stored.execution_mode, parent.execution_mode)
   assert.equal(stored.topic, parent.topic)
+})
+
+test('store-v2 persists across restarts and preserves idempotency', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-v2persist-'))
+  try {
+    const first = createV2Store({ dataDir: dir, persist: true })
+    const created = first.create(
+      {
+        message_id: 'a'.repeat(32), root_id: 'b'.repeat(32), parent_id: null,
+        origin: 'alpha', target: 'beta', kind: 'request', body: 'persist me',
+        session_ref: 's', created_at: 1, expires_at: 2, execution_mode: 'read',
+      },
+      'alpha:key1',
+    )
+    assert.equal(created.created, true)
+    first.close()
+
+    const second = createV2Store({ dataDir: dir, persist: true })
+    assert.ok(second.get(created.message_id), 'message must survive restart')
+    assert.equal(second.get(created.message_id).body, 'persist me')
+    // The same idempotency key must still dedupe after reload.
+    const dup = second.create(
+      {
+        message_id: 'c'.repeat(32), root_id: 'd'.repeat(32), parent_id: null,
+        origin: 'alpha', target: 'beta', kind: 'request', body: 'persist me',
+        session_ref: 's', created_at: 3, expires_at: 4, execution_mode: 'read',
+      },
+      'alpha:key1',
+    )
+    assert.equal(dup.message_id, created.message_id)
+    assert.equal(dup.created, false)
+    second.close()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

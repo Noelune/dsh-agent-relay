@@ -17,6 +17,8 @@ import {
   TTL_MIN_SECONDS as V2_TTL_MIN,
   TTL_MAX_SECONDS as V2_TTL_MAX,
   RelayMessage,
+  codePointLength,
+  truncateCodePoints,
   verifySignature as verifyV2Signature,
 } from './protocol.js'
 import { createV2Store } from './store-v2.js'
@@ -75,8 +77,10 @@ function isV2Request(req) {
 
 /**
  * Authenticate a v2 request (X-Agent-Relay-* headers, v2 signature scheme).
- * The agent's secret is the per-agent secret when configured, else the shared
- * secret (v1 fallback). Mirrors the self-use broker's `_authenticated_payload`.
+ * Mirrors the self-use broker's `_authenticated_payload`: when any configured
+ * agent has a per-agent secret (isolated mode), the agent must be configured
+ * and sign with its own secret; otherwise every agent name signs with the
+ * shared secret (v1-compatible).
  */
 function verifyV2Request(req, rawBody, config) {
   const agent = String(req.headers[V2_HEADERS.agent] || '').trim().toLowerCase()
@@ -86,7 +90,8 @@ function verifyV2Request(req, rawBody, config) {
     return { ok: false, status: 401, code: 'unauthenticated', message: 'missing v2 authentication headers' }
   }
   const entry = config.agents?.[agent]
-  const secret = entry?.secret ?? config.secret
+  const isolated = Object.values(config.agents ?? {}).some((agentCfg) => agentCfg?.secret)
+  const secret = isolated ? (entry?.secret ?? null) : config.secret
   if (!secret) {
     return { ok: false, status: 401, code: 'unknown_agent', message: 'agent is not configured' }
   }
@@ -362,7 +367,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
         const target = String(parsed.target || '').trim().toLowerCase()
         const kind = String(parsed.kind || '').trim().toLowerCase()
         const body = String(parsed.body || '').trim()
-        const sessionRef = String(parsed.session_ref || '').slice(0, 300)
+        const sessionRef = truncateCodePoints(parsed.session_ref, 300)
         const idempotencyKey = String(parsed.idempotency_key || '').trim().slice(0, 120)
         const parentId = parsed.parent_id ? String(parsed.parent_id).trim() : null
         const executionMode = String(parsed.execution_mode || 'read').trim().toLowerCase()
@@ -374,14 +379,14 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           sendJson(res, 400, errorBody('bad_request', 'invalid message kind'))
           return
         }
-        if (!body || body.length > V2_MAX_BODY || !idempotencyKey) {
+        if (!body || codePointLength(body) > V2_MAX_BODY || !idempotencyKey) {
           sendJson(res, 400, errorBody('bad_request', 'message body or idempotency key is invalid'))
           return
         }
         const now = Date.now() / 1000
-        const requestedTtl = Number(parsed.ttl_seconds) || 3600
+        const requestedTtl = Math.floor(Number(parsed.ttl_seconds) || 3600)
         const ttl = Math.max(V2_TTL_MIN, Math.min(requestedTtl, V2_TTL_MAX))
-        const topic = String(parsed.topic || '').slice(0, 200)
+        const topic = truncateCodePoints(parsed.topic, 200)
         let rootId = parsed.root_id ? String(parsed.root_id) : null
         let sessionRefFinal = sessionRef
         let executionModeFinal = executionMode
@@ -433,7 +438,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           created_at: now,
           expires_at: now + ttl,
           execution_mode: executionModeFinal,
-          context: String(parsed.context || '').slice(0, V2_MAX_BODY),
+          context: truncateCodePoints(parsed.context, V2_MAX_BODY),
           topic: topicFinal,
         })
         const { message_id, created } = storeV2.create(message, idempotencyKey)

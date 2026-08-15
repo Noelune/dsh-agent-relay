@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { canonicalBody, makeSignature, verifySignature } from '../broker/src/protocol.js'
+import { canonicalBody, makeSignature, verifySignature, codePointLength, truncateCodePoints } from '../broker/src/protocol.js'
 
 const AGENT = 'test-agent'
 const SECRET = 's3cret'
@@ -80,4 +80,18 @@ test('verifySignature accepts the golden signature and rejects a tampered one', 
   assert.equal(verifySignature(AGENT, SECRET, METHOD, PATH, TS, body, VECTORS[0].signature), true)
   assert.equal(verifySignature(AGENT, SECRET, METHOD, PATH, TS, body, '0'.repeat(64)), false)
   assert.equal(verifySignature(AGENT, SECRET, METHOD, PATH, TS, body, ''), false)
+})
+
+test('codePointLength counts Unicode code points (Python len semantics)', () => {
+  // An emoji is a surrogate pair: .length counts 2, code points count 1.
+  assert.equal('😀'.length, 2)
+  assert.equal(codePointLength('😀'), 1)
+  assert.equal(codePointLength('中文abc'), 5)
+  assert.equal(codePointLength(''), 0)
+})
+
+test('truncateCodePoints never splits a surrogate pair', () => {
+  assert.equal(truncateCodePoints('a😀b', 3), 'a😀b') // 3 code points fits
+  assert.equal(truncateCodePoints('a😀b', 2), 'a😀')  // does not split the emoji
+  assert.equal(truncateCodePoints('abcde', 3), 'abc')
 })
