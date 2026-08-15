@@ -19,6 +19,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { RelayClient } from '../../lib/client.js'
+import { RelayClientV2 } from '../../lib/client-v2.js'
 
 const STATE_FILE = join(homedir(), '.dsh-relay-state.json')
 
@@ -48,6 +49,17 @@ Commands:
   status <id> [<id>...]        batch status lookup (v1.1)
   recent [--limit N]           recent messages for this agent (v1.1)
   query [--kind K] [--status S] [--from F] [--to T] [--limit N]   read-only search (v1.1)
+
+v2 commands (wire protocol v2, docs/PROTOCOL-V2.md):
+  v2 health                     broker healthz + protocol metadata
+  v2 send <target> <body>       send a v2 request [--mode read|continue|write] [--session S] [--context C] [--topic T]
+  v2 pull [--limit N] [--lease S]  lease v2 messages addressed to this agent
+  v2 ack <id> <completed|retry> acknowledge a v2 message [--error E]
+  v2 status <id> [<id>...]      batch status (v2)
+  v2 recent [--limit N]         recent v2 messages
+  v2 query [--kind K] [--status S] [--topic T] [--limit N]   search v2 messages
+  v2 requeue <id>               admin: requeue a failed/expired/leased message
+  v2 cancel <id>                admin: cancel a non-terminal message
 
 Options:
   --broker <url>    broker base URL   (env DSH_RELAY_BROKER_URL, default http://127.0.0.1:19121)
@@ -99,6 +111,91 @@ async function main() {
   const client = new RelayClient({ brokerUrl: cfg.brokerUrl, agent: cfg.agent, secret: cfg.secret })
 
   const print = (obj) => { if (cfg.json) console.log(JSON.stringify(obj)); else console.log(JSON.stringify(obj, null, 2)) }
+
+  // ---- v2 subcommands (wire protocol v2) ----
+  if (command === 'v2') {
+    if (!cfg.agent) die('v2 commands need an agent name: pass --agent <name>')
+    const v2 = new RelayClientV2({ endpoint: cfg.brokerUrl, agent: cfg.agent, secret: cfg.secret })
+    const sub = argv[1]
+    const flag = (name, fallback) => {
+      const i = argv.indexOf(name)
+      return i !== -1 && argv[i + 1] ? argv[i + 1] : fallback
+    }
+    try {
+      switch (sub) {
+        case 'health': print(await v2.health()); return
+        case 'send': {
+          const target = argv[2]
+          const body = argv[3]
+          if (!target || body === undefined) die('usage: node relay.mjs v2 send <target> <body> [--mode read|continue|write]')
+          const messageId = await v2.sendRequest({
+            target,
+            body,
+            sessionRef: flag('--session', cfg.agent),
+            idempotencyKey: `${cfg.agent}:${Date.now()}`,
+            ttlSeconds: Number(flag('--ttl', 3600)),
+            executionMode: flag('--mode', 'read'),
+            context: flag('--context', undefined),
+            topic: flag('--topic', undefined),
+          })
+          print({ message_id: messageId })
+          return
+        }
+        case 'pull': {
+          const limit = Number(flag('--limit', 8))
+          const lease = flag('--lease', undefined)
+          const messages = await v2.pull({ limit, leaseSeconds: lease ? Number(lease) : undefined })
+          print({ count: messages.length, messages })
+          return
+        }
+        case 'ack': {
+          const id = argv[2]
+          const outcome = argv[3]
+          if (!id || (outcome !== 'completed' && outcome !== 'retry')) die('usage: node relay.mjs v2 ack <id> <completed|retry>')
+          print(await v2.ack(id, outcome, flag('--error', undefined)))
+          return
+        }
+        case 'status': {
+          const ids = argv.slice(2).filter((a) => !a.startsWith('--'))
+          if (!ids.length) die('usage: node relay.mjs v2 status <id> [<id>...]')
+          print({ messages: await v2.status(ids) })
+          return
+        }
+        case 'recent': {
+          const messages = await v2.recent(Number(flag('--limit', 20)))
+          print({ count: messages.length, messages })
+          return
+        }
+        case 'query': {
+          const filters = {}
+          for (const k of ['kind', 'status', 'topic', 'limit']) {
+            const v = flag(`--${k}`, undefined)
+            if (v !== undefined) filters[k] = v
+          }
+          const messages = await v2.query(filters)
+          print({ count: messages.length, messages })
+          return
+        }
+        case 'requeue': {
+          const id = argv[2]
+          if (!id) die('usage: node relay.mjs v2 requeue <id>')
+          print(await v2.requeue(id))
+          return
+        }
+        case 'cancel': {
+          const id = argv[2]
+          if (!id) die('usage: node relay.mjs v2 cancel <id>')
+          print(await v2.cancel(id))
+          return
+        }
+        default:
+          die('unknown v2 subcommand "' + sub + '" — run with --help')
+      }
+    } catch (err) {
+      die(`error: ${err?.message ?? err}`)
+    }
+    return
+  }
 
   try {
     switch (command) {

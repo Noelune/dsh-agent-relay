@@ -258,3 +258,17 @@ failed / expired →(admin requeue) queued
   ack is marked `failed` so the sender can see it was not processed.
 - Terminal messages (`completed`/`expired`/`failed`) are retained for
   **30 days**, then purged.
+
+## 8. Clients
+
+- **JS** — `lib/client-v2.js` (`RelayClientV2`): `sendRequest`, `sendReply`,
+  `pull`, `ack`, `status`, `recent`, `query`, `requeue`, `cancel`, `adminStatus`,
+  `health`.
+- **Python** — `adapters/hermes/relay_client_v2.py` (`RelayClientV2`, pure
+  stdlib): the same surface, byte-compatible with the self-use `relay/client.py`.
+- **CLI** — `adapters/cli/relay.mjs` exposes `v2 <subcommand>` for every v2
+  endpoint (health / send / pull / ack / status / recent / query / requeue /
+  cancel).
+
+The legacy v1 clients (`lib/client.js`, `adapters/hermes/relay_client.py`, the
+v1 CLI commands) remain for v1 compatibility.
