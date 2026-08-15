@@ -34,6 +34,7 @@ agents' way.
 - **Loopback-first, zero-config default** — broker binds 127.0.0.1:19121; no server, no TLS, no cloud needed for the single-machine mode.
 - **HMAC-SHA256 auth** with timestamp anti-replay, per-agent lockout (5 failures → 5 min) and per-IP rate limiting.
 - **Reliable delivery** — incremental polling with cursors, 7-day TTL, JSONL persistence across restarts, idempotent retries (2/4/8 s backoff, stable message ids, receiver-side dedup).
+- **Lease-based delivery (v1.1)** — `pull`/`ack` with a delivery state machine (`queued → leased → done/failed`, lease expiry re-queues, attempts capped); request/reply correlation (`kind`/`rootId`/`parentId`), batch status, recent and read-only query endpoints; per-agent routing ACL (optional, off by default).
 - **dsh first-class** — a cordis plugin registering relay_send / relay_recv / relay_peers / relay_history model tools, plus an optional sidebar status panel.
 - **Privacy by design** — message content is never written to application logs; the broker keeps it only in the TTL-limited queue (default 7 days) for delivery, and the dsh plugin keeps only an in-memory id-level history.
 - **Distributed mode (advanced, optional)** — one broker, many machines; documented with mandatory TLS.

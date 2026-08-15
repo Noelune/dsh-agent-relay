@@ -48,6 +48,17 @@ Out of scope (by design):
   to print.
 - Constant-time signature comparison (`timingSafeEqual`).
 
+## Routing ACL (v1.1)
+
+- Optional per-agent send whitelists: `agents.<name>.allowed_targets` in
+  `broker/config.yaml`. A sender with an `allowed_targets` list may only send
+  to those recipients (else `403 forbidden`).
+- An agent without an entry may send to anyone (v1.0 default) — add ACL entries
+  to tighten a shared broker.
+- Lease-based delivery (`/v1/pull`, `/v1/ack`) adds replay protection at the
+  message level: a pulled message is leased to one recipient and only they may
+  ack it (`403` otherwise).
+
 ## Reporting
 
 This is a community-maintained project. For security issues, open a GitHub

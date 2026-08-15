@@ -95,6 +95,7 @@
 - [ ] broker 启动，`selfcheck` 全部 ok（config 有效 / broker 可达 / 插件模块加载）。
 - [ ] 至少两个 Agent 注册成功，`peers` 能看到它们。
 - [ ] 一条消息端到端送达（发送方收到 `accepted:true`，接收方 `recv` 取到）。
+- [ ] （v1.1 租约）接收方用 `pull` 取到消息 → 处理完成后 `ack` `completed` → 状态变 `done`；`retry` 会 attempts+1 并重新入队。
 - [ ] 单机模式 broker 绑定回环地址；未向公网暴露明文端口。
 - [ ] 未在任何日志、配置、汇报中出现 secret 明文以外的敏感信息。
 - [ ] 消息内容仅存于 broker 的 TTL 限定期限投递队列（JSONL，默认 7 天清理），绝不写入应用日志；插件只记内存 id 级历史。

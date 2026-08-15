@@ -19,6 +19,7 @@ Agent 框架给每个 Agent 一张"嘴"，却没有"对讲机"。dsh、Codex、C
 - **默认单机、零配置**：broker 默认监听 127.0.0.1:19121，无需服务器 / TLS / 云。
 - **HMAC-SHA256 认证**：时间戳防重放、连续失败 5 次锁定 5 分钟、按 IP 限流。
 - **可靠投递**：增量轮询游标、7 天 TTL、JSONL 落盘重启不丢、2/4/8s 退避重试、消息 id 幂等（发送端重试 + 接收端去重）。
+- **租约式可靠投递（v1.1）**：`pull`/`ack` 状态机（queued → leased → done/failed，租约过期重投、attempts 封顶）；请求/回复关联（kind/rootId/parentId）、批量状态、最近与只读检索端点；按 Agent 路由 ACL（可选，默认关闭）。
 - **dsh 一等公民**：cordis 插件注册 relay_send / relay_recv / relay_peers / relay_history 模型工具，另附可选侧边栏状态面板。
 - **隐私设计**：消息内容绝不写入应用日志；broker 只在 TTL 限定期限的队列中保留（默认 7 天）用于投递，插件只记内存 id 级历史。
 - **分布式（可选进阶）**：一台 broker、多台机器，文档强制要求 TLS。

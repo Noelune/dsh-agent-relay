@@ -28,6 +28,22 @@ function errorBody(code, message) {
   return { error: { code, message } }
 }
 
+function parseJson(raw) {
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+function clampLimit(value, fallback = 50) {
+  const n = Number(value)
+  return Number.isFinite(n) ? Math.min(Math.max(1, Math.floor(n)), 200) : fallback
+}
+
+/** Per-agent routing ACL (v1.1). Absent entry / null targets = allow all. */
+function canSend(config, from, to) {
+  const entry = config.agents?.[from]
+  if (entry && entry.allowedTargets) return entry.allowedTargets.includes(to)
+  return true
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0
@@ -119,6 +135,10 @@ export function createBrokerServer({ config, store, auth }) {
           sendJson(res, 400, errorBody('bad_request', 'cannot send a message to yourself'))
           return
         }
+        if (!canSend(config, agent, msg.to)) {
+          sendJson(res, 403, errorBody('forbidden', `agent "${agent}" is not allowed to send to "${msg.to}"`))
+          return
+        }
         const now = Math.floor(Date.now() / 1000)
         const targetKnown = store.listPeers(now, HEARTBEAT_TTL_SECONDS).some((p) => p.agent === msg.to)
         if (!targetKnown) {
@@ -143,6 +163,91 @@ export function createBrokerServer({ config, store, auth }) {
         return
       }
 
+      // ---- v1.1 lease-based delivery endpoints ----
+
+      if (req.method === 'POST' && path === '/v1/pull') {
+        const parsed = parseJson(rawBody) ?? {}
+        if (parsed.agent !== undefined && parsed.agent !== agent) {
+          sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
+          return
+        }
+        const limit = clampLimit(parsed.limit)
+        const leaseSeconds = Number.isFinite(Number(parsed.leaseSeconds))
+          ? Math.max(1, Math.floor(Number(parsed.leaseSeconds)))
+          : config.leaseSeconds
+        const messages = store.pull(agent, limit, leaseSeconds)
+        sendJson(res, 200, { messages, count: messages.length })
+        return
+      }
+
+      if (req.method === 'POST' && path === '/v1/ack') {
+        const parsed = parseJson(rawBody)
+        if (!parsed || typeof parsed.messageId !== 'string' || !parsed.messageId) {
+          sendJson(res, 400, errorBody('bad_request', 'messageId is required'))
+          return
+        }
+        if (parsed.outcome !== 'completed' && parsed.outcome !== 'retry') {
+          sendJson(res, 400, errorBody('bad_request', 'outcome must be "completed" or "retry"'))
+          return
+        }
+        const target = store.findById(parsed.messageId)
+        if (!target) {
+          sendJson(res, 404, errorBody('no_such_message', 'message id not found (expired or unknown)'))
+          return
+        }
+        if (target.to !== agent) {
+          sendJson(res, 403, errorBody('forbidden', 'only the recipient may acknowledge this message'))
+          return
+        }
+        const r = store.ack(parsed.messageId, parsed.outcome, typeof parsed.error === 'string' ? parsed.error : null)
+        if (!r.ok) {
+          sendJson(res, 400, errorBody('bad_request', 'ack failed'))
+          return
+        }
+        sendJson(res, 200, { ok: true, status: r.status, attempts: r.attempts })
+        return
+      }
+
+      if (req.method === 'POST' && path === '/v1/status') {
+        const parsed = parseJson(rawBody)
+        if (!parsed || !Array.isArray(parsed.messageIds)) {
+          sendJson(res, 400, errorBody('bad_request', 'messageIds array is required'))
+          return
+        }
+        const messages = store.getStatus(parsed.messageIds.slice(0, 200).map(String))
+        sendJson(res, 200, { messages })
+        return
+      }
+
+      if (req.method === 'POST' && path === '/v1/recent') {
+        const parsed = parseJson(rawBody) ?? {}
+        if (parsed.agent !== undefined && parsed.agent !== agent) {
+          sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
+          return
+        }
+        const messages = store.getRecent(agent, clampLimit(parsed.limit))
+        sendJson(res, 200, { messages, count: messages.length })
+        return
+      }
+
+      if (req.method === 'POST' && path === '/v1/messages/query') {
+        const parsed = parseJson(rawBody) ?? {}
+        if (parsed.agent !== undefined && parsed.agent !== agent) {
+          sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
+          return
+        }
+        const messages = store.query({
+          agent,
+          limit: clampLimit(parsed.limit),
+          kind: typeof parsed.kind === 'string' ? parsed.kind : undefined,
+          status: typeof parsed.status === 'string' ? parsed.status : undefined,
+          from: typeof parsed.from === 'string' ? parsed.from : undefined,
+          to: typeof parsed.to === 'string' ? parsed.to : undefined,
+        })
+        sendJson(res, 200, { messages, count: messages.length })
+        return
+      }
+
       const ackMatch = /^\/messages\/([0-9a-fA-F-]+)\/ack$/.exec(path)
       if (req.method === 'POST' && ackMatch) {
         const target = store.findById(ackMatch[1])
@@ -158,16 +263,18 @@ export function createBrokerServer({ config, store, auth }) {
           return
         }
         const status = parsed.status === 'error' ? 'error' : 'ok'
-        const ack = {
-          id: randomUUID(),
-          from: agent,
-          to: target.from,
-          ts: new Date().toISOString(),
-          type: 'ack',
-          body: { status, error: status === 'error' ? String(parsed.error ?? 'unknown') : undefined },
-          replyTo: target.id,
-          ack: false,
-        }
+        const ack = normalizeEnvelope(
+          {
+            id: randomUUID(),
+            to: target.from,
+            type: 'ack',
+            body: { status, error: status === 'error' ? String(parsed.error ?? 'unknown') : undefined },
+            replyTo: target.id,
+            ack: false,
+          },
+          agent,
+          new Date().toISOString(),
+        )
         store.add(ack)
         sendJson(res, 201, { accepted: true, id: ack.id })
         return
