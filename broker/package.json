@@ -2,7 +2,7 @@
   "name": "dsh-agent-relay-broker",
   "version": "0.3.0",
   "private": true,
-  "description": "Message broker for the dsh-agent-relay wire protocol v1.0 (loopback-first, HMAC-authenticated, JSONL-persisted).",
+  "description": "Message broker for the dsh-agent-relay wire protocol v1.0 (loopback-first, HMAC-authenticated, SQLite-first with JSONL compatibility).",
   "type": "module",
   "main": "src/index.js",
   "engines": {

@@ -1,12 +1,14 @@
 /**
  * Minimal YAML-subset configuration loader.
  *
- * Supports the subset used by this project's config files:
- * top-level keys, one level of nesting, `key: value` scalars, `#` comments,
- * quoted strings. Everything else is rejected loudly — a typo must never
- * silently become a different setting.
+ * Supports the subset used by this project's config files: nested mappings,
+ * `key: value` scalars, inline arrays, `#` comments and quoted strings.
+ * Everything else is rejected loudly — a typo must never silently become a
+ * different setting.
  */
 import { readFileSync, existsSync } from 'node:fs'
+
+export const MAX_LEASE_SECONDS = 86_400
 
 /**
  * @param {string} path - path to a YAML-subset file.
@@ -16,22 +18,26 @@ export function loadConfig(path) {
   if (!existsSync(path)) throw new Error(`config file not found: ${path}`)
   const lines = readFileSync(path, 'utf8').split(/\r?\n/)
   const root = {}
-  let section = null
+  const stack = [{ indent: -1, value: root }]
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]
     const line = raw.replace(/#.*$/, '').trimEnd()
     if (!line.trim() || line.trim().startsWith('#')) continue
     const indent = line.length - line.trimStart().length
-    if (indent === 0) {
-      const m = /^([A-Za-z0-9_-]+):\s*$/.exec(line.trim())
-      if (!m) throw new Error(`config parse error at line ${i + 1}: expected section header, got "${line.trim()}"`)
-      section = m[1]
-      root[section] = root[section] ?? {}
+    const m = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line.trim())
+    if (!m) throw new Error(`config parse error at line ${i + 1}: expected "key: value"`)
+    while (stack.length > 1 && indent <= stack.at(-1).indent) stack.pop()
+    if (indent > 0 && stack.length === 1) {
+      throw new Error(`config parse error at line ${i + 1}: nested key without section`)
+    }
+    const parent = stack.at(-1).value
+    const [, key, rawValue] = m
+    if (rawValue.trim() === '') {
+      const child = {}
+      parent[key] = child
+      stack.push({ indent, value: child })
     } else {
-      if (!section) throw new Error(`config parse error at line ${i + 1}: nested key without section`)
-      const m = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line.trim())
-      if (!m) throw new Error(`config parse error at line ${i + 1}: expected "key: value"`)
-      root[section][m[1]] = parseScalar(m[2])
+      parent[key] = parseScalar(rawValue)
     }
   }
   return root
@@ -39,12 +45,16 @@ export function loadConfig(path) {
 
 function parseScalar(raw) {
   const value = raw.trim()
-  if (value === '') return null
   if (value === 'true') return true
   if (value === 'false') return false
   if (/^-?\d+$/.test(value)) return Number(value)
   if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
     return value.slice(1, -1)
+  }
+  if (value.startsWith('[') && value.endsWith(']')) {
+    const inner = value.slice(1, -1).trim()
+    if (!inner) return []
+    return inner.split(',').map((item) => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
   }
   return value
 }
@@ -63,11 +73,11 @@ export function normalizeConfig(loaded) {
     host: String(b.host ?? '127.0.0.1'),
     port: Number(b.port ?? 19121),
     secret,
-    tls: Boolean(b.tls ?? false),
     rateLimitLoopback: Number(b.rateLimitLoopback ?? 600),
     rateLimitRemote: Number(b.rateLimitRemote ?? 120),
     messageTtlDays: Number(b.messageTtlDays ?? 7),
-    persist: Boolean(b.persist ?? true),
+    persist: booleanConfig(b.persist, true, 'broker.persist'),
+    storage: String(b.storage ?? 'sqlite').toLowerCase(),
     dataDir: String(b.dataDir ?? './data'),
     lockAfterFailures: Number(s.lockAfterFailures ?? 5),
     lockMinutes: Number(s.lockMinutes ?? 5),
@@ -75,10 +85,31 @@ export function normalizeConfig(loaded) {
     maxAttempts: Number(b.maxAttempts ?? 3),
     agents: normalizeAgents(loaded.agents),
   }
+  if (b.tls !== undefined) {
+    throw new Error('broker.tls is not supported — terminate TLS at a trusted reverse proxy')
+  }
   if (!Number.isInteger(config.port) || config.port <= 0 || config.port > 65535) {
     throw new Error(`invalid broker.port: ${config.port}`)
   }
+  validateInteger(config.messageTtlDays, 0, 'broker.messageTtlDays')
+  validateInteger(config.leaseSeconds, 1, 'broker.leaseSeconds', MAX_LEASE_SECONDS)
+  validateInteger(config.maxAttempts, 0, 'broker.maxAttempts')
+  validateInteger(config.rateLimitLoopback, 1, 'broker.rateLimitLoopback')
+  validateInteger(config.rateLimitRemote, 1, 'broker.rateLimitRemote')
+  validateInteger(config.lockAfterFailures, 1, 'security.lockAfterFailures')
+  validateInteger(config.lockMinutes, 1, 'security.lockMinutes')
+  if (!['sqlite', 'jsonl'].includes(config.storage)) throw new Error(`invalid broker.storage: ${config.storage}`)
   return config
+}
+
+function booleanConfig(value, fallback, name) {
+  if (value === undefined) return fallback
+  if (typeof value === 'boolean') return value
+  throw new Error(`invalid ${name}: expected true or false`)
+}
+
+function validateInteger(value, minimum, name, maximum = Number.MAX_SAFE_INTEGER) {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`invalid ${name}: ${value}`)
 }
 
 /**
@@ -90,7 +121,16 @@ function normalizeAgents(loaded) {
   const out = {}
   for (const [name, cfg] of Object.entries(loaded ?? {})) {
     const targets = cfg?.allowed_targets
-    out[name] = { allowedTargets: Array.isArray(targets) ? targets.map(String) : null }
+    if (targets !== undefined && targets !== null && !Array.isArray(targets)) {
+      throw new Error(`invalid agents.${name}.allowed_targets: expected an inline array`)
+    }
+    const secret = cfg?.secret === undefined ? null : String(cfg.secret)
+    if (secret !== null && !secret) throw new Error(`invalid agents.${name}.secret: must not be empty`)
+    out[name] = { secret, allowedTargets: Array.isArray(targets) ? targets.map(String) : null }
+  }
+  const isolated = Object.values(out).some((agent) => agent.secret !== null)
+  if (isolated && Object.entries(out).some(([, agent]) => agent.secret === null)) {
+    throw new Error('invalid agents: per-agent authentication requires a secret for every configured agent')
   }
   return out
 }

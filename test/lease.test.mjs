@@ -36,19 +36,20 @@ test('lease: ack completed -> done; retry -> attempts+1; over max -> failed', ()
   const { store, dir } = tempStore(1) // maxAttempts = 1
   try {
     store.add(msg('1', 'alpha', 'beta'))
-    store.pull('beta', 10, 600)
-    let r = store.ack('1', 'retry')
+    let lease = store.pull('beta', 10, 600)[0]
+    let r = store.ack('1', lease.leaseId, 'retry')
     assert.equal(r.status, 'queued')
     assert.equal(r.attempts, 1)
-    assert.equal(store.pull('beta', 10, 600).length, 1) // re-queued, re-pullable
-    r = store.ack('1', 'retry')
+    lease = store.pull('beta', 10, 600)[0]
+    assert.ok(lease) // re-queued, re-pullable
+    r = store.ack('1', lease.leaseId, 'retry')
     assert.equal(r.status, 'failed') // attempts now 2 > maxAttempts 1
     assert.equal(r.attempts, 2)
     assert.equal(store.pull('beta', 10, 600).length, 0) // failed not re-delivered
     // completed
     store.add(msg('2', 'alpha', 'beta'))
-    store.pull('beta', 10, 600)
-    r = store.ack('2', 'completed')
+    lease = store.pull('beta', 10, 600)[0]
+    r = store.ack('2', lease.leaseId, 'completed')
     assert.equal(r.status, 'done')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
@@ -67,15 +68,42 @@ test('lease: expired lease re-queues the message', async () => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('lease: an expired worker cannot acknowledge a newer lease generation', async () => {
+  const { store, dir } = tempStore()
+  try {
+    store.add(msg('1', 'alpha', 'beta'))
+    const first = store.pull('beta', 1, 0)[0]
+    assert.match(first.leaseId, /^[0-9a-f-]{36}$/)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    store.leaseSweep()
+    const second = store.pull('beta', 1, 600)[0]
+    assert.notEqual(second.leaseId, first.leaseId)
+
+    assert.equal(store.ack('1', first.leaseId, 'completed').code, 'lease_mismatch')
+    assert.equal(store.findById('1').status, 'leased')
+    assert.equal(store.ack('1', second.leaseId, 'completed').status, 'done')
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('lease: ack requires the id to exist and validates outcome', () => {
   const { store, dir } = tempStore()
   try {
-    assert.equal(store.ack('missing', 'completed').ok, false)
-    assert.equal(store.ack('missing', 'completed').code, 'no_such_message')
+    assert.equal(store.ack('missing', 'lease', 'completed').ok, false)
+    assert.equal(store.ack('missing', 'lease', 'completed').code, 'no_such_message')
     store.add(msg('1', 'alpha', 'beta'))
-    assert.equal(store.ack('1', 'bogus').ok, false)
-    assert.equal(store.ack('1', 'bogus').code, 'bad_request')
+    assert.equal(store.ack('1', 'lease', 'bogus').ok, false)
+    assert.equal(store.ack('1', 'lease', 'bogus').code, 'bad_request')
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('lease: ack only accepts currently leased messages and is terminal-safe', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-ack-state-'))
+  const store = createStore({ ttlDays: 1, persist: false, dataDir: dir, maxAttempts: 3 })
+  store.add({ id: 'queued', to: 'beta', from: 'alpha', ts: new Date().toISOString(), status: 'queued', attempts: 0, leaseUntil: null })
+  assert.equal(store.ack('queued', 'lease', 'completed').ok, false)
+  const pulled = store.pull('beta', 1, 600)[0]
+  assert.equal(store.ack('queued', pulled.leaseId, 'completed').status, 'done')
+  assert.equal(store.ack('queued', pulled.leaseId, 'retry').ok, false)
 })
 
 test('lease: getStatus reports state; getRecent and query filter', () => {

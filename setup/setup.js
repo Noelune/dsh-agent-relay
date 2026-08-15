@@ -29,7 +29,7 @@ broker:
   host: 127.0.0.1          # loopback by default; use 0.0.0.0 only behind TLS
   port: 19121
   secret: ${secret}
-  tls: false               # remote deployment MUST enable TLS
+  storage: sqlite          # sqlite by default; set jsonl for Node <22.13 without SQLite
   rateLimitLoopback: 600
   rateLimitRemote: 120
   messageTtlDays: 7

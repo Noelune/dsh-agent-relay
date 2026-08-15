@@ -43,7 +43,8 @@ Commands:
   watch                        poll forever, printing new messages as they arrive
   handshake                    check broker version compatibility
   pull [--limit N] [--lease S] lease queued messages (v1.1)
-  ack <id> <completed|retry>   acknowledge a leased message (v1.1)
+  ack <id> <leaseId> <completed|retry>
+                                acknowledge the current lease (v1.1)
   status <id> [<id>...]        batch status lookup (v1.1)
   recent [--limit N]           recent messages for this agent (v1.1)
   query [--kind K] [--status S] [--from F] [--to T] [--limit N]   read-only search (v1.1)
@@ -161,10 +162,11 @@ async function main() {
       }
       case 'ack': {
         const id = argv[1]
-        const outcome = argv[2]
-        if (!id || (outcome !== 'completed' && outcome !== 'retry')) die('usage: node relay.mjs ack <messageId> <completed|retry>')
+        const leaseId = argv[2]
+        const outcome = argv[3]
+        if (!id || !leaseId || (outcome !== 'completed' && outcome !== 'retry')) die('usage: node relay.mjs ack <messageId> <leaseId> <completed|retry>')
         const errorArg = argv[argv.indexOf('--error') + 1]
-        print(await client.ackOutcome(id, outcome, errorArg))
+        print(await client.ackOutcome(id, leaseId, outcome, errorArg))
         return
       }
       case 'status': {
@@ -175,7 +177,8 @@ async function main() {
       }
       case 'recent': {
         const limit = Number(argv[argv.indexOf('--limit') + 1] ?? 50)
-        print({ count: (await client.recent(limit)).length, messages: await client.recent(limit) })
+        const messages = await client.recent(limit)
+        print({ count: messages.length, messages })
         return
       }
       case 'query': {
@@ -184,19 +187,21 @@ async function main() {
           const i = argv.indexOf(`--${k}`)
           if (i !== -1 && argv[i + 1]) filters[k] = argv[i + 1]
         }
-        print({ count: (await client.query(filters)).length, messages: await client.query(filters) })
+        const messages = await client.query(filters)
+        print({ count: messages.length, messages })
         return
       }
       case 'watch': {
         console.error(`[relay-cli] watching inbox of ${cfg.agent} at ${cfg.brokerUrl} (Ctrl+C to stop)`)
         await client.register()
         const seen = new Set()
-        setInterval(async () => {
+        const poll = async () => {
           try {
             const r = await client.recv(50)
             for (const msg of r.messages ?? []) {
               if (seen.has(msg.id)) continue
               seen.add(msg.id)
+              if (seen.size > 2000) seen.delete(seen.values().next().value)
               if (msg.type === 'ack') {
                 console.error(`[ack ${msg.replyTo}] ${msg.body?.status}`)
               } else {
@@ -205,7 +210,9 @@ async function main() {
               }
             }
           } catch { /* broker unreachable; retry on next tick */ }
-        }, 2000)
+          setTimeout(poll, 2000)
+        }
+        setTimeout(poll, 2000)
         await new Promise(() => {})
         return
       }

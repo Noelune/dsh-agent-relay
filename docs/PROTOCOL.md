@@ -76,11 +76,25 @@ Verify with a **constant-time comparison**. Reject with `401 unauthenticated` on
 ### `GET /` — version negotiation (no auth)
 
 ```json
-{ "protocol": "1.0", "broker": "dsh-agent-relay", "version": "0.1.0" }
+{
+  "protocol": "1.0",
+  "broker": "dsh-agent-relay",
+  "version": "0.3.0",
+  "capabilities": {
+    "leaseDelivery": true,
+    "requestReply": true,
+    "filteredQuery": true,
+    "sqlitePersistence": true
+  },
+  "storage": "sqlite"
+}
 ```
 
 Adapters MUST call this at startup and refuse to run on `protocol` mismatch
-(see reference client `RelayClient.handshake()`).
+(see reference client `RelayClient.handshake()`). `capabilities` and `storage` are additive runtime
+metadata: older brokers may omit them, and clients MUST NOT require them for baseline v1.0 behavior.
+`storage` reports the active backend (`memory`, `sqlite`, or `jsonl`); `sqlitePersistence` reports
+whether the current Node runtime supports the built-in SQLite backend.
 
 ### `POST /register` — register / heartbeat (auth)
 
@@ -119,6 +133,8 @@ Body: envelope (full or shorthand). Responses:
 
 ### `POST /messages/<id>/ack` — acknowledge receipt (auth)
 
+Only the authenticated recipient may submit this receipt. Lease acknowledgements require the message to be leased; terminal messages cannot be revived.
+
 Body: `{ "status": "ok" | "error", "error": "<string>" }` (`error` only when `status: "error"`).
 
 Stores a new `type: "ack"` envelope with `replyTo: <id>` back to the original sender.
@@ -132,8 +148,10 @@ Stores a new `type: "ack"` envelope with `replyTo: <id>` back to the original se
   (`200 duplicate: true`) — safe to re-send on timeout.
 - **Ordering:** messages get a monotonic sequence number; polling via `since` is incremental and
   stable across reconnects.
-- **Persistence:** with `persist: true` (default), messages are appended to `dataDir/messages.jsonl`
-  and reloaded on broker restart; unread messages survive restarts.
+- **Persistence:** with `persist: true` (default), messages use `dataDir/relay.db` on a Node runtime
+  with built-in SQLite support. Node 20 automatically falls back to `dataDir/messages.jsonl`;
+  `broker.storage: jsonl` selects that compatibility backend explicitly. Both backends preserve the
+  same envelope and lease state across restarts.
 - **Acks:** optional; when `ack: true` is set on a sent envelope, the receiver SHOULD reply via the
   ack endpoint so the sender can correlate with `replyTo`.
 
@@ -169,16 +187,24 @@ Lease defaults: `leaseSeconds` **600**, `maxAttempts` **3** (both broker config,
 | Endpoint | Body | Returns |
 |---|---|---|
 | `POST /v1/pull` | `{ "limit"?, "leaseSeconds"? }` (agent must match header) | `{ "messages": [...leased...], "count" }` |
-| `POST /v1/ack` | `{ "messageId", "outcome": "completed"\|"retry", "error"? }` | `{ "ok", "status", "attempts" }` (403 if not the recipient; 404 unknown id) |
+| `POST /v1/ack` | `{ "messageId", "leaseId", "outcome": "completed"\|"retry", "error"? }` | `{ "ok", "status", "attempts" }` (403 if not the recipient; 404 unknown id; 409 `not_leased` / `lease_mismatch`) |
 | `POST /v1/status` | `{ "messageIds": [...] }` | `{ "messages": [{id,status,attempts,ts,from,to,kind}] }` |
 | `POST /v1/recent` | `{ "limit"? }` (agent must match header) | `{ "messages": [...], "count" }` — most recent for this agent, any status, read-only |
 | `POST /v1/messages/query` | `{ "limit"?, "kind"?, "status"?, "from"?, "to"? }` | `{ "messages": [...], "count" }` — read-only filtered search |
 
 - `/v1/pull` leases queued messages (queued→leased); a leased message is not returned to anyone again
-  until its lease expires.
-- `/v1/ack` with `completed` finalizes a message; `retry` re-queues it (attempts+1, re-pullable).
+  until its lease expires. Each lease carries an opaque `leaseId` in the returned envelope.
+- `/v1/ack` with `completed` finalizes a message; `retry` re-queues it (attempts+1, re-pullable). The
+  `leaseId` from the `/v1/pull` envelope is **required** — the broker only accepts an acknowledgement
+  for the current lease generation, so a worker that lost its lease (expired, or superseded by a newer
+  pull) cannot ack or revive a message it no longer holds. This is a **breaking change vs. earlier
+  v1.1 drafts**: clients that acked without `leaseId` must be upgraded to echo it back.
 - The v1.0 `GET /messages` poll still works and now returns only `queued` messages, so a v1.0 client
-  sees new undelivered messages and never double-delivers leased/done ones.
+  sees new undelivered messages and never double-delivers leased/done ones. When a v1.1 lease expires
+  after a v1.0 cursor has advanced past that message, the broker returns that re-queued message once as
+  a cursor-independent recovery delivery. The response cursor does not move backwards; this preserves
+  incremental polling while preventing a mixed v1.0/v1.1 deployment from permanently skipping the
+  expired lease.
 
 **Routing ACL (optional, v1.1):**
 
@@ -190,14 +216,15 @@ agents:
     allowed_targets: [beta, gamma]
 ```
 
-`POST /messages` (and `/v1/messages`) returns `403 forbidden` when `from` has an `allowed_targets`
+`POST /messages` returns `403 forbidden` when `from` has an `allowed_targets`
 list that does not contain `to`. An agent with **no** entry (or `allowed_targets` absent) may send to
 anyone — v1.0 default.
 
-**Receipts (client-side, v1.1):** the dsh plugin persists completed replies to
-`~/.dsh-agent-relay-receipts.json` (TTL 1 day, atomic write). On a redelivered request whose id is in
-the receipts, the plugin replays the cached reply (stable id, idempotent) and acks `completed` — it
-never re-runs a completed turn after a restart.
+**Receipts (client-side, v1.1):** the dsh plugin persists completed replies per agent to
+`~/.dsh-agent-relay-receipts-<hash>.json` (TTL 1 day, atomic write; the hash is derived from the agent
+name so multiple plugin instances on one machine never share a receipt store). On a redelivered request
+whose id is in the receipts, the plugin replays the cached reply (stable id, idempotent) and acks
+`completed` — it never re-runs a completed turn after a restart.
 
 ## 6. Errors
 
@@ -209,12 +236,16 @@ All errors use a uniform body:
 
 | HTTP | `code` | Meaning |
 |---|---|---|
-| 400 | `bad_request` | Malformed body, `to` missing, `from` mismatch, self-send, bad `type`, body too large |
+| 400 | `bad_request` | Malformed body, `to` missing, `from` mismatch, self-send, bad `type`, body too large, invalid `leaseSeconds` |
 | 401 | `unauthenticated` | Missing/invalid signature or timestamp skew |
+| 401 | `unknown_agent` | Per-agent authentication: the agent name is not configured |
 | 403 | `locked` | Agent locked out after repeated auth failures |
+| 403 | `forbidden` | ACL rejects the send, or the acking agent is not the recipient |
 | 404 | `no_such_agent` | Recipient has never registered |
 | 404 | `no_such_message` | Ack target id unknown or expired |
 | 404 | `not_found` | No route for `METHOD path` |
+| 409 | `not_leased` | `/v1/ack`: the message is not currently leased |
+| 409 | `lease_mismatch` | `/v1/ack`: the supplied `leaseId` does not match the current lease |
 | 429 | `rate_limited` | Per-IP rate limit exceeded |
 | 503 | `busy` | Internal broker error (message content is never included) |
 

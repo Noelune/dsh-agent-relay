@@ -6,6 +6,7 @@ import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { normalizeEnvelope } from './store.js'
+import { MAX_LEASE_SECONDS } from './config.js'
 
 const require = createRequire(import.meta.url)
 
@@ -32,6 +33,11 @@ function parseJson(raw) {
   try { return JSON.parse(raw) } catch { return null }
 }
 
+function parseJsonObject(raw) {
+  const parsed = parseJson(raw)
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+}
+
 function clampLimit(value, fallback = 50) {
   const n = Number(value)
   return Number.isFinite(n) ? Math.min(Math.max(1, Math.floor(n)), 200) : fallback
@@ -47,12 +53,14 @@ function canSend(config, from, to) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0
+    let tooLarge = false
     const chunks = []
     req.on('data', (chunk) => {
+      if (tooLarge) return
       size += chunk.length
       if (size > MAX_BODY_BYTES) {
+        tooLarge = true
         reject(Object.assign(new Error('body too large'), { code: 'bad_request' }))
-        req.destroy()
         return
       }
       chunks.push(chunk)
@@ -77,7 +85,18 @@ export function createBrokerServer({ config, store, auth }) {
 
       // Version negotiation and liveness need no auth.
       if (req.method === 'GET' && path === '/') {
-        sendJson(res, 200, { protocol: PROTOCOL_VERSION, broker: BROKER_NAME, version: BROKER_VERSION })
+        sendJson(res, 200, {
+          protocol: PROTOCOL_VERSION,
+          broker: BROKER_NAME,
+          version: BROKER_VERSION,
+          capabilities: {
+            leaseDelivery: true,
+            requestReply: true,
+            filteredQuery: true,
+            sqlitePersistence: store.sqliteSupported,
+          },
+          storage: store.storage,
+        })
         return
       }
 
@@ -166,24 +185,31 @@ export function createBrokerServer({ config, store, auth }) {
       // ---- v1.1 lease-based delivery endpoints ----
 
       if (req.method === 'POST' && path === '/v1/pull') {
-        const parsed = parseJson(rawBody) ?? {}
+        const parsed = parseJsonObject(rawBody)
+        if (!parsed) {
+          sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+          return
+        }
         if (parsed.agent !== undefined && parsed.agent !== agent) {
           sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
           return
         }
         const limit = clampLimit(parsed.limit)
-        const leaseSeconds = Number.isFinite(Number(parsed.leaseSeconds))
-          ? Math.max(1, Math.floor(Number(parsed.leaseSeconds)))
-          : config.leaseSeconds
+        const requestedLease = parsed.leaseSeconds === undefined ? config.leaseSeconds : parsed.leaseSeconds
+        const leaseSeconds = Number(requestedLease)
+        if (!Number.isInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > MAX_LEASE_SECONDS) {
+          sendJson(res, 400, errorBody('bad_request', `leaseSeconds must be an integer from 1 to ${MAX_LEASE_SECONDS}`))
+          return
+        }
         const messages = store.pull(agent, limit, leaseSeconds)
         sendJson(res, 200, { messages, count: messages.length })
         return
       }
 
       if (req.method === 'POST' && path === '/v1/ack') {
-        const parsed = parseJson(rawBody)
-        if (!parsed || typeof parsed.messageId !== 'string' || !parsed.messageId) {
-          sendJson(res, 400, errorBody('bad_request', 'messageId is required'))
+        const parsed = parseJsonObject(rawBody)
+        if (!parsed || typeof parsed.messageId !== 'string' || !parsed.messageId || typeof parsed.leaseId !== 'string' || !parsed.leaseId) {
+          sendJson(res, 400, errorBody('bad_request', 'messageId and leaseId are required'))
           return
         }
         if (parsed.outcome !== 'completed' && parsed.outcome !== 'retry') {
@@ -199,9 +225,10 @@ export function createBrokerServer({ config, store, auth }) {
           sendJson(res, 403, errorBody('forbidden', 'only the recipient may acknowledge this message'))
           return
         }
-        const r = store.ack(parsed.messageId, parsed.outcome, typeof parsed.error === 'string' ? parsed.error : null)
+        const r = store.ack(parsed.messageId, parsed.leaseId, parsed.outcome, typeof parsed.error === 'string' ? parsed.error : null)
         if (!r.ok) {
-          sendJson(res, 400, errorBody('bad_request', 'ack failed'))
+          const message = r.code === 'lease_mismatch' ? 'leaseId does not match the current lease' : 'message is not currently leased'
+          sendJson(res, 409, errorBody(r.code, message))
           return
         }
         sendJson(res, 200, { ok: true, status: r.status, attempts: r.attempts })
@@ -209,18 +236,22 @@ export function createBrokerServer({ config, store, auth }) {
       }
 
       if (req.method === 'POST' && path === '/v1/status') {
-        const parsed = parseJson(rawBody)
+        const parsed = parseJsonObject(rawBody)
         if (!parsed || !Array.isArray(parsed.messageIds)) {
           sendJson(res, 400, errorBody('bad_request', 'messageIds array is required'))
           return
         }
-        const messages = store.getStatus(parsed.messageIds.slice(0, 200).map(String))
+        const messages = store.getStatus(parsed.messageIds.slice(0, 200).map(String), agent)
         sendJson(res, 200, { messages })
         return
       }
 
       if (req.method === 'POST' && path === '/v1/recent') {
-        const parsed = parseJson(rawBody) ?? {}
+        const parsed = parseJsonObject(rawBody)
+        if (!parsed) {
+          sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+          return
+        }
         if (parsed.agent !== undefined && parsed.agent !== agent) {
           sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
           return
@@ -231,7 +262,11 @@ export function createBrokerServer({ config, store, auth }) {
       }
 
       if (req.method === 'POST' && path === '/v1/messages/query') {
-        const parsed = parseJson(rawBody) ?? {}
+        const parsed = parseJsonObject(rawBody)
+        if (!parsed) {
+          sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+          return
+        }
         if (parsed.agent !== undefined && parsed.agent !== agent) {
           sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
           return
@@ -253,6 +288,10 @@ export function createBrokerServer({ config, store, auth }) {
         const target = store.findById(ackMatch[1])
         if (!target) {
           sendJson(res, 404, errorBody('no_such_message', 'message id not found (expired or unknown)'))
+          return
+        }
+        if (target.to !== agent) {
+          sendJson(res, 403, errorBody('forbidden', 'only the recipient may acknowledge this message'))
           return
         }
         let parsed
@@ -284,7 +323,8 @@ export function createBrokerServer({ config, store, auth }) {
     } catch (err) {
       // Never log message content — ids and events only.
       console.error(`[relay-broker] ${new Date().toISOString()} error: ${err.message}`)
-      sendJson(res, 503, errorBody('busy', 'internal broker error'))
+      const status = err.code === 'bad_request' ? 400 : 503
+      sendJson(res, status, errorBody(err.code === 'bad_request' ? 'bad_request' : 'busy', err.code === 'bad_request' ? err.message : 'internal broker error'))
     }
   })
 }

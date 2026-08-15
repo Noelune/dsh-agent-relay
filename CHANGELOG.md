@@ -28,6 +28,19 @@ All notable changes to this project are documented in this file.
 - **Docs**: PROTOCOL v1.1 extension, DEPLOY v1.1 config, SECURITY ACL, README/zh,
   AGENT-DEPLOY checklist.
 
+### Fixed
+
+- SQLite is now the default persistent backend, creates a missing data directory on first start,
+  and falls back to JSONL on Node runtimes where `node:sqlite` cannot be loaded (Node < 22.5, and
+  22.5–22.12 which gate it behind `--experimental-sqlite`). `GET /` reports the active backend and
+  optional capabilities without changing protocol 1.0 compatibility.
+- The Python adapter now sends legacy acknowledgements with the correct HTTP method and retries
+  `408`/`429` responses consistently with the JavaScript client.
+- Configuration parsing now supports the documented nested agent ACL structure and rejects invalid
+  safety, delivery, rate-limit, and lockout values at startup. The removed `broker.tls` label now
+  fails loudly at startup (terminate TLS at a trusted reverse proxy) instead of being silently
+  ignored — config templates no longer emit it.
+
 ### Tests
 
 - `test/lease.test.mjs` (state machine, lease expiry, attempts, status/recent/query)
@@ -61,7 +74,7 @@ All notable changes to this project are documented in this file.
 - **CLI**: `peers`/`handshake` no longer require `--agent` (docs already
   assumed it); removed a duplicated ack loop.
 - **Docs accuracy**: privacy claims now correctly state that message content
-  lives only in the broker's TTL-limited queue (default 7 days, JSONL) and is
+  lives only in the broker's TTL-limited queue (default 7 days) and is
   never written to application logs — aligning README/README.zh and the
   `AGENT-DEPLOY.md` checklist with the actual persistence behavior.
 

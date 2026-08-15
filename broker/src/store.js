@@ -14,6 +14,8 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
 
 const TTL_SCAN_MS = 60_000
 
@@ -38,6 +40,49 @@ export function createStore(opts) {
   const maxAttempts = opts.maxAttempts ?? 3
   let nextSeq = 1
   const persistPath = join(opts.dataDir, 'messages.jsonl')
+  const sqlitePath = join(opts.dataDir, 'relay.db')
+  let db = null
+  let sweepTimer = null
+  // Node's built-in SQLite is only loadable from 22.5, and 22.5–22.12 still gate
+  // it behind --experimental-sqlite. `builtinModules` alone is not enough (it
+  // lists the module even when the flag is required), so probe the actual loader
+  // and fall back to JSONL whenever the module cannot be loaded.
+  let DatabaseSync = null
+  try {
+    ({ DatabaseSync } = require('node:sqlite'))
+  } catch {
+    DatabaseSync = null
+  }
+  const sqliteSupported = typeof DatabaseSync === 'function'
+  if (opts.persist && opts.storage === 'sqlite' && sqliteSupported) {
+    try {
+      mkdirSync(opts.dataDir, { recursive: true })
+      db = new DatabaseSync(sqlitePath)
+      db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS messages (seq INTEGER PRIMARY KEY, payload TEXT NOT NULL);')
+    } catch (error) {
+      try { db?.close() } catch {}
+      throw new Error(`SQLite storage initialization failed: ${error.message}`, { cause: error })
+    }
+  }
+
+  function normalizePersisted(message) {
+    return {
+      status: STATUS.QUEUED,
+      attempts: 0,
+      leaseUntil: null,
+      leaseId: null,
+      legacyRedelivery: false,
+      kind: 'message',
+      rootId: null,
+      parentId: null,
+      ...message,
+    }
+  }
+
+  function publicMessage(message) {
+    const { legacyRedelivery, ...envelope } = message
+    return envelope
+  }
 
   function load() {
     if (!opts.persist || !existsSync(persistPath)) return
@@ -46,7 +91,7 @@ export function createStore(opts) {
       try {
         const rec = JSON.parse(line)
         // Old v1.0 lines lack the v1.1 fields — normalize on load.
-        const msg = { status: STATUS.QUEUED, attempts: 0, leaseUntil: null, kind: 'message', rootId: null, parentId: null, ...rec.message }
+        const msg = normalizePersisted(rec.message)
         messages.set(rec.seq, msg)
         idToSeq.set(msg.id, rec.seq)
         if (rec.seq >= nextSeq) nextSeq = rec.seq + 1
@@ -56,9 +101,29 @@ export function createStore(opts) {
     }
   }
 
+  function loadSqlite() {
+    if (!db) return
+    const rows = db.prepare('SELECT seq, payload FROM messages ORDER BY seq').all()
+    for (const rec of rows) {
+      try { const msg = normalizePersisted(JSON.parse(rec.payload)); messages.set(Number(rec.seq), msg); idToSeq.set(msg.id, Number(rec.seq)); if (Number(rec.seq) >= nextSeq) nextSeq = Number(rec.seq) + 1 } catch {}
+    }
+  }
+
   function persistAll() {
     if (!opts.persist) return
     mkdirSync(opts.dataDir, { recursive: true })
+    if (db) {
+      db.exec('BEGIN IMMEDIATE; DELETE FROM messages;')
+      try {
+        const insert = db.prepare('INSERT INTO messages(seq, payload) VALUES(?, ?)')
+        for (const [seq, message] of messages) insert.run(seq, JSON.stringify(message))
+        db.exec('COMMIT;')
+      } catch (error) {
+        try { db.exec('ROLLBACK;') } catch {}
+        throw error
+      }
+      return
+    }
     const lines = [...messages.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([seq, message]) => JSON.stringify({ seq, message }))
@@ -68,6 +133,7 @@ export function createStore(opts) {
   function appendOne(seq, message) {
     if (!opts.persist) return
     mkdirSync(opts.dataDir, { recursive: true })
+    if (db) { db.prepare('INSERT OR REPLACE INTO messages(seq, payload) VALUES(?, ?)').run(seq, JSON.stringify(message)); return }
     appendFileSync(persistPath, JSON.stringify({ seq, message }) + '\n', 'utf8')
   }
 
@@ -92,6 +158,11 @@ export function createStore(opts) {
       if (msg.status === STATUS.LEASED && msg.leaseUntil != null && msg.leaseUntil < now) {
         msg.status = STATUS.QUEUED
         msg.leaseUntil = null
+        msg.leaseId = null
+        // v1.0 polling uses a monotonic cursor. Once a later queued message has
+        // advanced that cursor, this older leased message would otherwise never
+        // be visible after it expires. Mark one cursor-independent replay.
+        msg.legacyRedelivery = true
         changed = true
       }
     }
@@ -113,20 +184,33 @@ export function createStore(opts) {
   /**
    * Poll: messages addressed to `agent` with seq strictly after the seq of
    * `sinceId` (or all when sinceId is null/unknown). Only `queued` messages are
-   * returned, so leased/done ones are never double-delivered.
+   * returned, so leased/done ones are never double-delivered. A message that
+   * has expired from a v1.1 lease receives one cursor-independent replay to
+   * prevent a legacy cursor from permanently skipping it.
    */
   function getSince(agent, sinceId, limit = 50) {
     const start = sinceId && idToSeq.has(sinceId) ? idToSeq.get(sinceId) + 1 : 1
     const out = []
+    let highestNormalSeq = null
+    let replayedLeaseExpiry = false
     const seqs = [...messages.keys()].sort((a, b) => a - b)
     for (const seq of seqs) {
-      if (seq < start) continue
       const msg = messages.get(seq)
-      if (msg.to !== agent || msg.status !== STATUS.QUEUED) continue
-      out.push(msg)
+      if (msg.to !== agent) continue
+      if (msg.status === STATUS.LEASED) continue
+      if (msg.status !== STATUS.QUEUED) continue
+      const isNormal = seq >= start
+      if (!isNormal && !msg.legacyRedelivery) continue
+      out.push(publicMessage(msg))
+      if (isNormal) highestNormalSeq = seq
+      if (msg.legacyRedelivery) {
+        msg.legacyRedelivery = false
+        replayedLeaseExpiry = true
+      }
       if (out.length >= limit) break
     }
-    const cursor = out.length ? out[out.length - 1].id : (sinceId ?? null)
+    if (replayedLeaseExpiry) persistAll()
+    const cursor = highestNormalSeq === null ? (sinceId ?? null) : messages.get(highestNormalSeq).id
     return { messages: out, cursor }
   }
 
@@ -135,6 +219,9 @@ export function createStore(opts) {
    * `agent` as leased and return them. Lease expiry re-queues via leaseSweep.
    */
   function pull(agent, limit = 50, leaseSeconds = 600) {
+    // Do not wait for the periodic sweep before making an expired delivery
+    // available to the next receiver pull.
+    leaseSweep()
     const out = []
     const seqs = [...messages.keys()].sort((a, b) => a - b)
     const leaseUntil = Date.now() + leaseSeconds * 1000
@@ -143,7 +230,8 @@ export function createStore(opts) {
       if (msg.to !== agent || msg.status !== STATUS.QUEUED) continue
       msg.status = STATUS.LEASED
       msg.leaseUntil = leaseUntil
-      out.push(msg)
+      msg.leaseId = randomUUID()
+      out.push(publicMessage(msg))
       if (out.length >= limit) break
     }
     if (out.length) persistAll()
@@ -154,13 +242,17 @@ export function createStore(opts) {
    * Acknowledge a leased message. Returns { ok, status, attempts }.
    * outcome 'completed' -> done; 'retry' -> queued (attempts+1, over max -> failed).
    */
-  function ack(messageId, outcome, error) {
+  function ack(messageId, leaseId, outcome, error) {
     const seq = idToSeq.get(messageId)
     const msg = seq === undefined ? null : messages.get(seq)
     if (!msg) return { ok: false, code: 'no_such_message' }
+    if (outcome !== 'completed' && outcome !== 'retry') return { ok: false, code: 'bad_request' }
+    if (msg.status !== STATUS.LEASED) return { ok: false, code: 'not_leased' }
+    if (typeof leaseId !== 'string' || !leaseId || msg.leaseId !== leaseId) return { ok: false, code: 'lease_mismatch' }
     if (outcome === 'completed') {
       msg.status = STATUS.DONE
       msg.leaseUntil = null
+      msg.leaseId = null
       msg.error = error ?? null
       persistAll()
       return { ok: true, status: msg.status, attempts: msg.attempts }
@@ -170,9 +262,11 @@ export function createStore(opts) {
       if (msg.attempts > maxAttempts) {
         msg.status = STATUS.FAILED
         msg.leaseUntil = null
+        msg.leaseId = null
       } else {
         msg.status = STATUS.QUEUED
         msg.leaseUntil = null
+        msg.leaseId = null
       }
       msg.error = error ?? null
       persistAll()
@@ -182,7 +276,7 @@ export function createStore(opts) {
   }
 
   /** Batch status lookup (v1.1). */
-  function getStatus(ids) {
+  function getStatus(ids, agent) {
     const out = []
     for (const id of ids ?? []) {
       const seq = idToSeq.get(id)
@@ -191,6 +285,10 @@ export function createStore(opts) {
         continue
       }
       const msg = messages.get(seq)
+      if (agent && msg.to !== agent && msg.from !== agent) {
+        out.push({ id, status: 'not_found', attempts: 0 })
+        continue
+      }
       out.push({ id, status: msg.status, attempts: msg.attempts, ts: msg.ts, from: msg.from, to: msg.to, kind: msg.kind ?? 'message' })
     }
     return out
@@ -203,7 +301,7 @@ export function createStore(opts) {
     for (const seq of seqs) {
       const msg = messages.get(seq)
       if (msg.to !== agent) continue
-      out.push(msg)
+      out.push(publicMessage(msg))
       if (out.length >= limit) break
     }
     return out
@@ -221,7 +319,7 @@ export function createStore(opts) {
       if (status && msg.status !== status) continue
       if (from && msg.from !== from) continue
       if (to && msg.to !== to) continue
-      out.push(msg)
+      out.push(publicMessage(msg))
       if (out.length >= limit) break
     }
     return out
@@ -244,11 +342,29 @@ export function createStore(opts) {
     return out.sort((a, b) => a.agent.localeCompare(b.agent))
   }
 
-  load()
+  if (db) {
+    loadSqlite()
+    if (!messages.size && existsSync(persistPath)) {
+      load()
+      if (messages.size) persistAll()
+    }
+  } else {
+    load()
+  }
   if (opts.persist) sweepExpired()
-  setInterval(() => { leaseSweep(); sweepExpired() }, TTL_SCAN_MS).unref()
+  sweepTimer = setInterval(() => { leaseSweep(); sweepExpired() }, TTL_SCAN_MS)
+  sweepTimer.unref()
 
-  return { add, getSince, findById, registerAgent, listPeers, pull, ack, getStatus, getRecent, query, leaseSweep }
+  function close() {
+    if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null }
+    if (db) { db.close(); db = null }
+  }
+  return {
+    add, getSince, findById, registerAgent, listPeers, pull, ack, getStatus, getRecent, query,
+    leaseSweep, sweepExpired, close,
+    get storage() { return !opts.persist ? 'memory' : db ? 'sqlite' : 'jsonl' },
+    sqliteSupported,
+  }
 }
 
 /** Build a well-formed envelope from a shorthand or full body. */
@@ -283,7 +399,7 @@ export function normalizeEnvelope(body, from, nowIso) {
     id: body.id ?? randomUUID(),
     from: body.from ?? from,
     to: body.to,
-    ts: body.ts ?? nowIso,
+    ts: nowIso,
     type: body.type ?? 'message',
     body: body.body ?? {},
     replyTo: body.replyTo ?? null,
@@ -294,5 +410,6 @@ export function normalizeEnvelope(body, from, nowIso) {
     status: STATUS.QUEUED,
     attempts: 0,
     leaseUntil: null,
+    leaseId: null,
   }
 }

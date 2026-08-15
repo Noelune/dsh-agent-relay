@@ -35,9 +35,9 @@
 - **HMAC-SHA256 严密鉴权体系 (Cryptographic Verification)**  
   所有 HTTP 接口调用均经由 HMAC-SHA256 签名校验，内置 300 秒时间戳重放防护、连续 5 次鉴权失败引发的 5 分钟安全锁定机制及单 IP 速率限制。
 - **高可靠投递与容错机制 (Reliable Delivery & Idempotency)**  
-  采用基于游标的增量轮询机制 (`since`)，支持消息 7 天 TTL 保持、JSONL 格式磁盘持久化、指数退避重试算法 (2s/4s/8s) 与接收端基于 UUID 的幂等去重。
+  采用基于游标的增量轮询与租约确认机制，支持消息 7 天 TTL、SQLite 默认持久化（Node 20 自动回退 JSONL）、指数退避重试 (2s/4s/8s) 与基于 UUID 的幂等去重。
 - **隐私保护设计 (Privacy-by-Design)**  
-  Broker 服务端与客户端 SDK **绝不记录或持久化任何消息体内容**，仅保留事件 UUID 及路由时间戳日志。
+  消息体只为可靠投递保存在本机 TTL 队列中，Broker 与参考客户端**不会把消息体写入应用日志或遥测**；默认回环部署时数据不离开本机。
 - **dsh 一级工具无缝集成 (First-Class Cordis Plugin)**  
   针对 DeepSeek Harness 提供原生 Cordis 插件，注册 `relay_send`、`relay_recv`、`relay_peers`、`relay_history` 模型工具，并提供图形化侧边栏状态面板。
 
@@ -49,8 +49,8 @@
 |---|---|---|---|
 | **架构定位** | 纯粹消息路由总线，保持 Agent 推理独立 | 强依赖 DAG 图逻辑，侵入式驱动控制流 | 人类社交 UI 框架，包含复杂的 Presence 状态 |
 | **部署与网络依赖** | 零第三方依赖，Loopback 本地极速运行 | 需复杂的中间件环境与 Redis/数据库支持 | 需公网访问、OAuth 鉴权与 WebSocket 长连接 |
-| **状态持久化与容错** | 本地 JSONL 7 天 TTL + 游标增量轮询 | 依赖外部集中式数据库管理状态 | 依赖第三方云端服务器消息留存 |
-| **数据隐私保护** | 纯本地运行，消息体零日志持久化 | 常见云端日志留存与 Embedding 上传 | 消息明文通过第三方服务器中转 |
+| **状态持久化与容错** | 本地 SQLite（JSONL 兼容）+ 7 天 TTL + 租约投递 | 依赖外部集中式数据库管理状态 | 依赖第三方云端服务器消息留存 |
+| **数据隐私保护** | 默认纯本地，消息体不进入日志或遥测 | 常见云端日志留存与 Embedding 上传 | 消息明文通过第三方服务器中转 |
 
 ---
 
@@ -65,7 +65,7 @@ sequenceDiagram
 
     Note over D,C: Loopback 架构下基于 HMAC-SHA256 的通信流程
     D->>B: POST /messages (HMAC Signed) <br> { to: "claude", body: { task: "code_review" } }
-    Note over B: 1. 校验 Timestamp < 300s<br>2. 验证 HMAC-SHA256 签名<br>3. 写入 JSONL 持久化队列 (TTL 7d)
+    Note over B: 1. 校验 Timestamp < 300s<br>2. 验证 HMAC-SHA256 签名<br>3. 写入本地持久化队列 (TTL 7d)
     B-->>D: 201 Created (Message ID: UUID)
 
     C->>B: GET /messages?since=cursor (HMAC Signed)
@@ -150,7 +150,7 @@ Signature     = HMAC-SHA256(secretKey, SigningString).hex()
 
 | 路径 | 功能说明 |
 |---|---|
-| `broker/` | Relay 中继核心服务（基于零依赖 Node.js，包含配置管理、HMAC 鉴权、JSONL 持久化与 HTTP 服务）+ Dockerfile |
+| `broker/` | Relay 中继核心服务（零 npm 运行依赖，包含配置、HMAC 鉴权、SQLite/JSONL 持久化与 HTTP 服务）+ Dockerfile |
 | `lib/` | dsh 插件核心：提供模型工具接口 (`relay_send` / `relay_recv` / `relay_peers` / `relay_history`) 与客户端库 |
 | `adapters/cli/` | 零第三方依赖 Node.js CLI 客户端适配器 |
 | `adapters/hermes/` | 纯 Python 标准库客户端适配器 + Hermes 风格 Agent 集成示例 |
@@ -162,7 +162,7 @@ Signature     = HMAC-SHA256(secretKey, SigningString).hex()
 
 ## 🔧 环境要求 (Requirements)
 
-- Node.js ≥ 20 (Broker 服务、CLI 客户端、dsh 插件)
+- Node.js ≥ 20 (Broker 服务、CLI 客户端、dsh 插件)。默认持久化后端为 **SQLite**（零外部依赖，使用 Node 内置 `node:sqlite`，需 **Node ≥ 22.5**，22.13+/23.4+ 起无需 flag）；在更早的运行时自动回退为 JSONL（`broker.storage: jsonl` 可显式选择）。
 - Python ≥ 3.10 (仅 Python 客户端适配器需要，可选)
 - dsh 0.1.0-rc.6 (推荐测试版本)
 

@@ -137,6 +137,8 @@ export DSH_RELAY_SECRET=<same-secret-everywhere>
 - [ ] Watch the broker logs for repeated `locked` events (brute-force attempts)
 - [ ] Keep `config.yaml` out of version control everywhere
 
+For Docker, mount a generated `broker/config.yaml` or provide `RELAY_SECRET`; the image refuses to start with the example placeholder.
+
 ---
 
 ## v1.1 configuration (optional)
@@ -146,6 +148,8 @@ The broker ships with lease-based reliable delivery enabled by default:
 - `broker.leaseSeconds` (default **600**) — how long a pulled message is leased before it is
   re-queued for another attempt.
 - `broker.maxAttempts` (default **3**) — retries allowed before a message is marked `failed`.
+- `broker.storage` (default **sqlite**) — uses Node's built-in SQLite when available; Node 20 falls
+  back to JSONL automatically. Set `jsonl` explicitly for compatibility or migration testing.
 
 Per-agent routing ACL is optional and off by default (v1.0 compatible). To restrict who may send to
 whom, add an `agents` block to `broker/config.yaml`:

@@ -32,10 +32,12 @@ const store = createStore({
   ttlDays: config.messageTtlDays,
   persist: config.persist,
   dataDir: resolve(BROKER_DIR, config.dataDir),
+  storage: config.storage,
   maxAttempts: config.maxAttempts,
 })
 const auth = createAuthenticator({
   secret: config.secret,
+  agents: config.agents,
   lockAfterFailures: config.lockAfterFailures,
   lockMinutes: config.lockMinutes,
   rateLimitLoopback: config.rateLimitLoopback,
@@ -44,12 +46,18 @@ const auth = createAuthenticator({
 const server = createBrokerServer({ config, store, auth })
 
 server.listen(config.port, config.host, () => {
-  const proto = config.tls ? 'https' : 'http'
-  console.log(`[relay-broker] listening on ${proto}://${config.host}:${config.port}`)
-  console.log(`[relay-broker] protocol 1.0 | persist=${config.persist} | ttl=${config.messageTtlDays}d`)
+  console.log(`[relay-broker] listening on http://${config.host}:${config.port}`)
+  console.log(`[relay-broker] protocol 1.0 | storage=${config.storage} | persist=${config.persist} | ttl=${config.messageTtlDays}d`)
 })
 
 server.on('error', (err) => {
   console.error(`[relay-broker] fatal: ${err.message}`)
   process.exit(1)
 })
+
+function shutdown() {
+  store.close?.()
+  server.close(() => process.exit(0))
+}
+process.once('SIGINT', shutdown)
+process.once('SIGTERM', shutdown)

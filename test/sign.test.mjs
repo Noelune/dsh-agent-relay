@@ -49,6 +49,27 @@ test('auth: valid signature passes', () => {
   assert.equal(verdict.agent, 'alpha')
 })
 
+test('auth: per-agent secrets prevent one configured agent impersonating another', () => {
+  const auth = createAuthenticator({
+    secret: SECRET,
+    agents: { alpha: { secret: 'alpha-secret' }, beta: { secret: 'beta-secret' } },
+    lockAfterFailures: 5,
+    lockMinutes: 5,
+    rateLimitLoopback: 1000,
+    rateLimitRemote: 1000,
+  })
+  const ts = Math.floor(Date.now() / 1000)
+  const alphaSignature = signRequest('alpha-secret', 'GET', '/peers', ts, '')
+  assert.equal(auth.check(fakeReq('alpha', ts, alphaSignature), '').ok, true)
+  const impersonation = auth.check(fakeReq('beta', ts, alphaSignature), '')
+  assert.equal(impersonation.ok, false)
+  assert.equal(impersonation.code, 'unauthenticated')
+  const unknownSignature = signRequest(SECRET, 'GET', '/peers', ts, '')
+  const unknown = auth.check(fakeReq('unknown', ts, unknownSignature), '')
+  assert.equal(unknown.ok, false)
+  assert.equal(unknown.code, 'unknown_agent')
+})
+
 test('auth: missing headers -> 401', () => {
   const auth = createAuthenticator({ secret: SECRET, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 1000, rateLimitRemote: 1000 })
   const verdict = auth.check(fakeReq('alpha', 0, ''), '')
@@ -91,4 +112,21 @@ test('auth: rate limit enforced per IP', () => {
   const verdict = auth.check(fakeReq('alpha', ts, sig), '')
   assert.equal(verdict.ok, false)
   assert.equal(verdict.status, 429)
+})
+
+test('auth: rate-limit state stays bounded under many client addresses', () => {
+  const auth = createAuthenticator({
+    secret: SECRET,
+    lockAfterFailures: 5,
+    lockMinutes: 5,
+    rateLimitLoopback: 1,
+    rateLimitRemote: 1,
+    maxTrackedClients: 2,
+  })
+  const ts = Math.floor(Date.now() / 1000)
+  const sig = signRequest(SECRET, 'GET', '/peers', ts, '')
+  assert.equal(auth.check(fakeReq('alpha', ts, sig, '127.0.0.1'), '').ok, true)
+  assert.equal(auth.check(fakeReq('alpha', ts, sig, '127.0.0.2'), '').ok, true)
+  assert.equal(auth.check(fakeReq('alpha', ts, sig, '127.0.0.3'), '').ok, true)
+  assert.equal(auth.check(fakeReq('alpha', ts, sig, '127.0.0.1'), '').ok, true)
 })

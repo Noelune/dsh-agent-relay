@@ -86,7 +86,7 @@ class RelayClient:
                 parsed = None
             code = (parsed or {}).get("error", {}).get("code", "unknown")
             message = (parsed or {}).get("error", {}).get("message", str(exc))
-            if exc.code >= 500 and retries < len(RETRY_DELAYS_SECONDS):
+            if (exc.code >= 500 or exc.code in (408, 429)) and retries < len(RETRY_DELAYS_SECONDS):
                 time.sleep(RETRY_DELAYS_SECONDS[retries])
                 return self._request(method, path, body, retries + 1)
             if exc.code == 409 or code == "duplicate":
@@ -143,7 +143,8 @@ class RelayClient:
         return self._request("POST", "/messages", payload)
 
     def recv(self, limit: int = 50) -> dict[str, Any]:
-        path = f"/messages?since={self.since or ''}&limit={limit}"
+        from urllib.parse import quote
+        path = f"/messages?since={quote(self.since or '', safe='')}&limit={quote(str(limit), safe='')}"
         result = self._request("GET", path)
         if result and isinstance(result.get("messages"), list) and result["messages"]:
             self.since = result.get("cursor") or self.since
@@ -157,7 +158,7 @@ class RelayClient:
         body: dict[str, Any] = {"status": status}
         if error:
             body["error"] = error
-        return self._request(f"/messages/{message_id}/ack", body)
+        return self._request("POST", f"/messages/{message_id}/ack", body)
 
     # -- v1.1 lease-based delivery --------------------------------------
 
@@ -169,9 +170,9 @@ class RelayClient:
         result = self._request("POST", "/v1/pull", body)
         return result or {"messages": [], "count": 0}
 
-    def ack_outcome(self, message_id: str, outcome: str, error: str | None = None) -> dict[str, Any]:
+    def ack_outcome(self, message_id: str, lease_id: str, outcome: str, error: str | None = None) -> dict[str, Any]:
         """Acknowledge a leased message: outcome 'completed' or 'retry' (v1.1)."""
-        body: dict[str, Any] = {"messageId": message_id, "outcome": outcome}
+        body: dict[str, Any] = {"messageId": message_id, "leaseId": lease_id, "outcome": outcome}
         if error:
             body["error"] = error
         return self._request("POST", "/v1/ack", body)

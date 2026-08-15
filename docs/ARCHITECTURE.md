@@ -27,7 +27,7 @@ flowchart LR
 
 | Component | Location | Role |
 |---|---|---|
-| Broker | `broker/` | HTTP service: HMAC auth, routing table, message queue (memory + optional JSONL), polling API, brute-force lockout, rate limiting |
+| Broker | `broker/` | HTTP service: HMAC auth, routing table, message queue (memory + SQLite default + JSONL compatibility), polling/lease API, brute-force lockout, rate limiting |
 | dsh plugin | repo root (cordis bundle) | Registers `relay_send` / `relay_recv` / `relay_peers` / `relay_history` model tools; background heartbeat + inbox polling |
 | CLI client | `adapters/cli/relay.mjs` | Zero-dependency Node client for scripts, cron jobs, Codex/Claude wrappers |
 | Python client | `adapters/hermes/relay_client.py` | Pure-stdlib Python client for any Python-based agent |

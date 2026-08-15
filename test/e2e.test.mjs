@@ -8,6 +8,7 @@ import { createStore } from '../broker/src/store.js'
 import { createAuthenticator } from '../broker/src/auth.js'
 import { createBrokerServer } from '../broker/src/server.js'
 import { RelayClient } from '../lib/client.js'
+import { authHeaders } from '../lib/sign.js'
 
 const SECRET = randomBytes(32).toString('hex')
 let server
@@ -120,4 +121,20 @@ test('protocol mismatch is detected by the client handshake', async () => {
   const a = client('e2e-alpha')
   const info = await a.handshake()
   assert.equal(info.protocol, '1.0')
+})
+
+test('v1.1 endpoints reject malformed JSON instead of silently using defaults', async () => {
+  const rawBody = '{'
+  for (const path of ['/v1/pull', '/v1/recent', '/v1/messages/query']) {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...authHeaders(SECRET, 'e2e-alpha', 'POST', path, rawBody),
+      },
+      body: rawBody,
+    })
+    assert.equal(res.status, 400, path)
+    assert.equal((await res.json()).error.code, 'bad_request', path)
+  }
 })
