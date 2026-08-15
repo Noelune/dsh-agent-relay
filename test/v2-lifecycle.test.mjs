@@ -137,3 +137,31 @@ test('cancel marks a queued message completed and stops delivery', async () => {
   const after = await pull('beta')
   assert.ok(!after.some((m) => m.message_id === messageId), 'cancelled message must not be delivered')
 })
+
+test('store-v2 cleanup: past expires_at becomes expired; expired lease re-queues', () => {
+  const now = Date.now() / 1000
+  const expiredId = v2Store.create(
+    {
+      message_id: 'e'.repeat(32), root_id: 'f'.repeat(32), parent_id: null,
+      origin: 'alpha', target: 'beta', kind: 'request', body: 'too late',
+      session_ref: 's', created_at: now - 7200, expires_at: now - 3600, execution_mode: 'read',
+    },
+    'life:expired',
+  ).message_id
+  const leasedId = v2Store.create(
+    {
+      message_id: 'g'.repeat(32), root_id: 'h'.repeat(32), parent_id: null,
+      origin: 'alpha', target: 'beta', kind: 'request', body: 'lease ran out',
+      session_ref: 's', created_at: now, expires_at: now + 3600, execution_mode: 'read',
+    },
+    'life:leasere',
+  ).message_id
+  // Manually lease the second message with an expired lease.
+  const leased = v2Store.get(leasedId)
+  leased.status = 'leased'
+  leased.lease_until = now - 10
+  v2Store.cleanup(now)
+  assert.equal(v2Store.get(expiredId).status, 'expired')
+  assert.equal(v2Store.get(leasedId).status, 'queued')
+  assert.equal(v2Store.get(leasedId).lease_until, null)
+})

@@ -368,7 +368,16 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   }
 
   function close() {
+    if (maintenanceTimer) { clearInterval(maintenanceTimer); maintenanceTimer = null }
     if (db) { try { db.close() } catch {} db = null }
+  }
+
+  // Periodic housekeeping (expiry + retention) even when nobody pulls.
+  const MAINTENANCE_INTERVAL_MS = 5 * 60 * 1000
+  let maintenanceTimer = null
+  if (persist) {
+    maintenanceTimer = setInterval(() => { try { cleanup(Date.now() / 1000) } catch { /* best-effort */ } }, MAINTENANCE_INTERVAL_MS)
+    maintenanceTimer.unref()
   }
 
   load()

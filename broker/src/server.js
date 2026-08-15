@@ -303,11 +303,12 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           }
           let limit = 8
           if (parsed.limit !== undefined) {
-            limit = Math.max(1, Math.min(Math.floor(Number(parsed.limit)) || 1, 8))
-            if (!Number.isFinite(Number(parsed.limit))) {
+            const rawLimit = Number(parsed.limit)
+            if (!Number.isFinite(rawLimit)) {
               sendJson(res, 400, errorBody('bad_request', 'limit must be an integer'))
               return
             }
+            limit = Math.max(1, Math.min(Math.floor(rawLimit), 8))
           }
           let leaseSeconds
           if (parsed.lease_seconds !== undefined) {
