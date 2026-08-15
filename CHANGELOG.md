@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.0] — 2026-08-15
+
+### Added
+
+- **Agent-driven deployment**: new `docs/AGENT-DEPLOY.md` deploy task book for
+  DSH — the npm package now ships the broker + setup + adapters, so a
+  single-machine deployment needs no git clone; DSH follows the task book to
+  generate the secret, start the broker, wire the plugin/CLI/Python clients
+  and verify the round trip.
+- **npm package is self-contained**: `files` now includes `broker/`, `setup/`,
+  `adapters/`, `docs/` and `README.zh.md`; a new `.npmignore` keeps secrets,
+  runtime data and `test/` out of the tarball.
+
+### Fixed
+
+- **Broker version no longer hard-coded**: `broker/src/server.js` reads the
+  version from the root `package.json`, so `/` and `selfcheck` always report
+  the real package version (was stuck at 0.1.0).
+- **Plugin protocol handshake**: the dsh plugin now performs the PROTOCOL §4
+  version negotiation on first poll (matching the Python client), surfacing an
+  incompatible-broker error instead of proceeding silently.
+- **Plugin not-configured guidance**: points to `docs/AGENT-DEPLOY.md` and is
+  npm-aware (no longer assumes a git checkout with `setup/setup.js`).
+
+### CI
+
+- Unit tests now run on **macOS as well as Linux** (matrix).
+
 ## [0.1.1] — 2026-08-15
 
 ### Fixed

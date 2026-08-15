@@ -3,12 +3,16 @@
  * See docs/PROTOCOL.md — this file is the reference implementation.
  */
 import { createServer } from 'node:http'
+import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { normalizeEnvelope } from './store.js'
 
+const require = createRequire(import.meta.url)
+
 const PROTOCOL_VERSION = '1.0'
 const BROKER_NAME = 'dsh-agent-relay'
-const BROKER_VERSION = '0.1.0'
+// Keep in sync with package.json automatically — never hard-code a version here.
+const BROKER_VERSION = require('../../package.json').version
 const HEARTBEAT_TTL_SECONDS = 90
 const MAX_BODY_BYTES = 1024 * 1024
 
