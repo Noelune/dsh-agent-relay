@@ -31,3 +31,6 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+
+# Runtime data (v2 transitional store)
+data/
