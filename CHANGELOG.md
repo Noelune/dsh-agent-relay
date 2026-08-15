@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] — 2026-08-15
+
+### Added — v2 wire protocol (self-use compatible) + advanced dsh plugin
+
+- **v2 wire protocol** (`docs/PROTOCOL-V2.md`): canonical-JSON signing
+  (`sort_keys` + compact + raw UTF-8), `X-Agent-Relay-*` headers, snake_case
+  envelope (`message_id/origin/target/kind/body/session_ref/created_at/expires_at/execution_mode/context/topic`).
+  Byte-for-byte compatible with the self-use Python `relay/protocol.py` (golden
+  vectors locked in `test/protocol-v2.test.mjs` + `test/protocol_v2_golden.py`).
+- **v2 broker endpoints**: `/healthz`, `/v1/messages`, `/v1/pull`, `/v1/ack`,
+  `/v1/status`, `/v1/recent`, `/v1/messages/query`, `/v1/admin/requeue|cancel|status`.
+- **v2 state machine** in the transitional `store-v2.js`: queued → leased →
+  completed/failed/expired, `(origin, idempotency_key)` idempotency, TTL +
+  30-day retention, SQLite (node:sqlite) with JSONL fallback.
+- **per-mode ACL** (`allowed_read/continue/write_targets`; write closed by
+  default) and **undelivered notices** (`notify_failed_to_sender`).
+- **v2 clients**: `lib/client-v2.js` (RelayClientV2), `adapters/hermes/relay_client_v2.py`
+  (pure stdlib), CLI `v2 <subcommand>`.
+- **dsh plugin upgrade** (`lib/index.js`): adaptive-backoff inbox polling,
+  per-root relay sessions (`agent-relay-<root_id>`) with archive + idle recycle,
+  5 tools (`agent_relay_send/status/history/peers/retry`), execution-mode
+  permission presets, per-agent receipts/routes persistence, systemPrompt
+  guidance. Replaces the v1 relay_send/recv/peers/history tools.
+- **v1 compatibility preserved** — every existing v1 endpoint/client/test still
+  works (the v1 protocol is a separate path, documented in `docs/PROTOCOL.md`).
+
 ## [0.3.0] — 2026-08-15
 
 ### Added — v1.1 reliable delivery (backward compatible, protocol stays 1.0)
