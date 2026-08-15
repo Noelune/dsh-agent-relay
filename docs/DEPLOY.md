@@ -183,3 +183,60 @@ cp setup/docker-compose.yml . && RELAY_SECRET=<secret> docker compose up --build
   broker and all adapters negotiate it on startup and refuse mismatches loudly.
 - Plugin API changes of dsh itself are tracked in [CHANGELOG.md](../CHANGELOG.md)
   with upgrade notes. This project is tested against dsh 0.1.0-rc.6.
+
+## Switching from the self-use Python broker (Phase 7)
+
+This repository is the converged home of the v2 wire protocol and the advanced
+capabilities that previously lived in the self-use Python broker (`relay/`)
+and the custom dsh plugin. To cut over without losing history:
+
+1. **Prepare the Node broker config** mirroring your self-use `agent_relay`
+   section — per-agent secrets and per-mode ACLs:
+
+   ```yaml
+   broker:
+     host: 127.0.0.1
+     port: 19122              # NEW port first; keep the old broker running
+     secret: <shared-hex>     # or configure per-agent secrets under agents:
+     storage: sqlite
+     dataDir: ./data
+     leaseSeconds: 600
+     maxAttempts: 3
+     notifyFailedToSender: true
+   agents:
+     codex:   { secret: <hex>, allowed_read_targets: [claude, hermes, openclaw, dsh], allowed_write_targets: [] }
+     claude:  { secret: <hex>, allowed_read_targets: [codex, hermes, openclaw, dsh], allowed_write_targets: [] }
+     hermes:  { secret: <hex>, allowed_read_targets: [codex, claude, openclaw, dsh], allowed_write_targets: [claude] }
+     openclaw:{ secret: <hex>, allowed_read_targets: [codex, claude, hermes, dsh], allowed_write_targets: [] }
+     dsh:     { secret: <hex>, allowed_read_targets: [codex, claude, hermes, openclaw], allowed_write_targets: [] }
+   ```
+
+2. **Migrate the message history** from the self-use database:
+
+   ```bash
+   node setup/migrate-v2.mjs \
+     --source "D:/AI机器人/飞书CodexClaude机器人/data/agent-relay.db" \
+     --data-dir ./data
+   ```
+
+   (requires Node ≥ 22.13 for built-in SQLite; imports every `relay_messages`
+   row into `relay-v2.db` preserving state, attempts, idempotency.)
+
+3. **Start the Node broker on the new port** and validate with
+   `node setup/setup.js selfcheck` plus a `v2 send/pull/ack` round trip.
+
+4. **Point each agent at the new port** — set the relay endpoint to
+   `http://127.0.0.1:19122` (for the dsh plugin, either
+   `~/.dsh/agent-relay.json` `endpoint` or the `DSH_RELAY_BROKER_URL` env), and
+   for standalone codex/claude agents run
+   `node adapters/relay-agent.mjs --agent <name> --broker http://127.0.0.1:19122 ...`.
+
+5. **Smoke-test the whole circle**: every agent can send/receive; `agent_relay_peers`
+   shows all members online; a write request reaches an allowed target.
+
+6. **Cut over**: stop the self-use Python broker on 19121, change the Node
+   broker port back to 19121 (or repoint clients), and remove the old
+   `~/.dsh/agent-relay*.json` receipts if you want a clean slate.
+
+7. **Retire** the self-use `relay/` package and the custom plugin code once the
+   circle has run clean for 24 h — their capabilities now live in this repo.

@@ -39,7 +39,9 @@
 - **隐私保护设计 (Privacy-by-Design)**  
   消息体只为可靠投递保存在本机 TTL 队列中，Broker 与参考客户端**不会把消息体写入应用日志或遥测**；默认回环部署时数据不离开本机。
 - **dsh 一级工具无缝集成 (First-Class Cordis Plugin)**  
-  针对 DeepSeek Harness 提供原生 Cordis 插件，注册 `relay_send`、`relay_recv`、`relay_peers`、`relay_history` 模型工具，并提供图形化侧边栏状态面板。
+  针对 DeepSeek Harness 提供原生 Cordis 插件，注册 `agent_relay_send` / `agent_relay_status` / `agent_relay_history` / `agent_relay_peers` / `agent_relay_retry` 模型工具，自适应退避轮询 + per-root relay 会话 + read/write 权限预设，并提供图形化侧边栏状态面板。
+- **v2 线协议（自用版兼容，v1 兼容层保留）**  
+  与自用版 Python broker 字节兼容的 v2 协议（canonical-JSON 签名、snake_case 信封、execution mode、per-mode ACL、undelivered 通知）；老 v1 客户端照常可用。
 
 ---
 
@@ -151,7 +153,7 @@ Signature     = HMAC-SHA256(secretKey, SigningString).hex()
 | 路径 | 功能说明 |
 |---|---|
 | `broker/` | Relay 中继核心服务（零 npm 运行依赖，包含配置、HMAC 鉴权、SQLite/JSONL 持久化与 HTTP 服务）+ Dockerfile |
-| `lib/` | dsh 插件核心：提供模型工具接口 (`relay_send` / `relay_recv` / `relay_peers` / `relay_history`) 与客户端库 |
+| `lib/` | dsh 插件核心：v2 模型工具 (`agent_relay_send` / `status` / `history` / `peers` / `retry`)、v2 客户端 (`client-v2.js`)、v1 兼容客户端、workspace 租约/隔离、插件纯逻辑核心 |
 | `adapters/cli/` | 零第三方依赖 Node.js CLI 客户端适配器 |
 | `adapters/hermes/` | 纯 Python 标准库客户端适配器 + Hermes 风格 Agent 集成示例 |
 | `adapters/openclaw/` | OpenClaw 框架集成适配说明文档 |
