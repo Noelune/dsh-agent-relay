@@ -1,0 +1,36 @@
+# Secrets — never commit
+*.secret
+.env
+.env.*
+
+# Runtime data (never ship a real secret or message store)
+broker/config.yaml
+broker/data/
+logs/
+sessions/
+*.bak*
+*.tmp
+*.log
+
+# Probe/tooling files
+.dsh-*
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+*.tgz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Extra excludes for the npm package
+test/

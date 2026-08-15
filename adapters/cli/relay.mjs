@@ -86,7 +86,9 @@ async function main() {
   }
   const command = argv[0]
   const cfg = loadConfig(argv)
-  if (!cfg.agent) die('missing agent name: pass --agent <name> or set DSH_RELAY_AGENT')
+  // peers/handshake are read-only and do not need an agent identity.
+  const NEEDS_AGENT = new Set(['register', 'send', 'recv', 'watch'])
+  if (NEEDS_AGENT.has(command) && !cfg.agent) die('missing agent name: pass --agent <name> or set DSH_RELAY_AGENT')
   if (!cfg.secret) die('missing secret: pass --secret <hex> or set DSH_RELAY_SECRET (generate with "node setup/setup.js init")')
   const client = new RelayClient({ brokerUrl: cfg.brokerUrl, agent: cfg.agent, secret: cfg.secret })
 
@@ -128,12 +130,6 @@ async function main() {
             const batch = r.messages ?? []
             out = out.concat(batch)
             if (batch.length === 0) break
-          }
-        }
-        // Receiver semantics (PROTOCOL §4/§5): send receipts for requested acks.
-        for (const msg of out) {
-          if (msg.ack && msg.type === 'message') {
-            try { await client.ack(msg.id, 'ok') } catch { /* best-effort */ }
           }
         }
         // Receiver semantics (PROTOCOL §4/§5): send receipts for requested acks.

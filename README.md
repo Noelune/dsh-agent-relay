@@ -58,6 +58,17 @@ For the dsh plugin instead of the CLI:
 
 Full guide: [docs/DEPLOY.md](docs/DEPLOY.md) · Protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md) · Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Security: [docs/SECURITY.md](docs/SECURITY.md)
 
+## Deploy with DSH (agent-driven)
+
+Prefer to let an agent deploy it? Install the plugin, then have DSH read
+[docs/AGENT-DEPLOY.md](docs/AGENT-DEPLOY.md) and follow it end-to-end: it
+generates the broker secret, starts the broker, wires the dsh plugin (plus
+CLI / Python clients), runs `selfcheck`, and reports what it did.
+
+The npm package ships the broker + setup + adapters, so a single-machine
+deployment needs **no git clone**. If a broker is already running, the plugin
+only needs `DSH_RELAY_SECRET` (and a stable `DSH_RELAY_AGENT`).
+
 ## Architecture at a glance
 
     dsh (plugin) ─┐

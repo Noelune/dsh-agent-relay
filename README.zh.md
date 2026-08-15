@@ -47,6 +47,12 @@ Agent 框架给每个 Agent 一张"嘴"，却没有"对讲机"。dsh、Codex、C
 
 完整部署：docs/DEPLOY.md · 协议：docs/PROTOCOL.md · 架构：docs/ARCHITECTURE.md · 安全：docs/SECURITY.md
 
+## 用 DSH 部署（Agent 驱动）
+
+想省事？装好插件后，让 DSH 完整阅读 [docs/AGENT-DEPLOY.md](docs/AGENT-DEPLOY.md) 并端到端执行：它生成 broker 密钥、启动 broker、接入 dsh 插件（及 CLI / Python 客户端）、跑 `selfcheck` 并汇报结果。
+
+npm 包已自带 broker + setup + adapters，**单机部署无需 git clone**。若 broker 已在运行，插件只需配 `DSH_RELAY_SECRET`（和一个稳定的 `DSH_RELAY_AGENT`）。
+
 ## 仓库结构
 
 | 路径 | 内容 |
