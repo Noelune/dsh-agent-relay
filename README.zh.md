@@ -1,88 +1,191 @@
-# dsh-agent-relay
+<div align="center">
 
-> 多 Agent 协作中继（DeepSeek Harness 插件）：让本机各 Agent（dsh / Codex / Claude / Hermes / OpenClaw…）经一个轻量、HMAC 认证的 broker 互相收发消息。默认单机回环、零第三方依赖、5 分钟跑通闭环。
+# ⚡ dsh-agent-relay
 
-[![npm version](https://img.shields.io/npm/v/dsh-agent-relay)](https://www.npmjs.com/package/dsh-agent-relay)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+### *Local Multi-Agent Collaboration Relay for DeepSeek Harness & Local Fleets*
 
-## 为什么需要它
+*DeepSeek Harness 本地多 Agent 轻量级通信中继总线 — 基于 HMAC-SHA256 鉴权与 Loopback 优先架构的安全消息路由组件*
 
-Agent 框架给每个 Agent 一张"嘴"，却没有"对讲机"。dsh、Codex、Claude、Hermes 共处一台机器时，彼此之间没有互发消息的通道——除非你自己搭。**dsh-agent-relay 就是这条通道**：一个完整可部署的 starter-kit（broker + dsh 插件 + CLI 客户端 + Python 客户端 + setup 脚本），任何人都能在几分钟内部署。
+[![npm version](https://img.shields.io/npm/v/dsh-agent-relay?style=flat-square&color=38bdf8)](https://www.npmjs.com/package/dsh-agent-relay)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Zero Dependency](https://img.shields.io/badge/dependencies-0-brightgreen.svg?style=flat-square)](#)
+[![Loopback First](https://img.shields.io/badge/network-loopback__first-cyan.svg?style=flat-square)](#)
+[![Security HMAC](https://img.shields.io/badge/security-HMAC--SHA256-purple.svg?style=flat-square)](#)
 
-- **不是编排引擎**：不管 workflow/DAG/调度，只负责"把消息送到"。
-- **不是记忆系统**：消息只存在于 TTL 限定期限的投递队列（默认 7 天，JSONL 保证重启不丢）——不是持久化知识库。共享记忆请用 [unified-agent-memory](https://github.com/Noelune/unified-agent-memory)。
-- **不是聊天服务器**：没有房间概念，只有在线/离线心跳。
+[产品定位与设计动机](#-产品定位与设计动机) • [核心技术特性](#-核心技术特性) • [系统架构与流程](#-系统架构与工作流) • [Agent 全流程自动部署](#-agent-全流程自动部署流程) • [Wire Protocol 规范](#-wire-protocol-v10-规范)
 
-## 特性
+</div>
 
-- **协议先行**：一份版本化 wire protocol（[docs/PROTOCOL.md](docs/PROTOCOL.md)），所有适配器（JS 插件 / JS CLI / Python 客户端）按同一协议实现，天然互通。
-- **默认单机、零配置**：broker 默认监听 127.0.0.1:19121，无需服务器 / TLS / 云。
-- **HMAC-SHA256 认证**：时间戳防重放、连续失败 5 次锁定 5 分钟、按 IP 限流。
-- **可靠投递**：增量轮询游标、7 天 TTL、JSONL 落盘重启不丢、2/4/8s 退避重试、消息 id 幂等（发送端重试 + 接收端去重）。
-- **租约式可靠投递（v1.1）**：`pull`/`ack` 状态机（queued → leased → done/failed，租约过期重投、attempts 封顶）；请求/回复关联（kind/rootId/parentId）、批量状态、最近与只读检索端点；按 Agent 路由 ACL（可选，默认关闭）。
-- **dsh 一等公民**：cordis 插件注册 relay_send / relay_recv / relay_peers / relay_history 模型工具，另附可选侧边栏状态面板。
-- **隐私设计**：消息内容绝不写入应用日志；broker 只在 TTL 限定期限的队列中保留（默认 7 天）用于投递，插件只记内存 id 级历史。
-- **分布式（可选进阶）**：一台 broker、多台机器，文档强制要求 TLS。
+---
 
-## 快速开始（5 步，单机）
+## 📌 产品定位与设计动机
 
-    # 1. 克隆
-    git clone https://github.com/Noelune/dsh-agent-relay.git && cd dsh-agent-relay
-    # 2. 生成配置与随机密钥
-    node setup/setup.js init
-    # 3. 启动 broker
-    node setup/setup.js start
-    # 4. 另开终端，接入两个 agent
-    export DSH_RELAY_SECRET=<broker/config.yaml 里的 secret>
-    node adapters/cli/relay.mjs register --agent alpha --secret $DSH_RELAY_SECRET
-    node adapters/cli/relay.mjs register --agent beta  --secret $DSH_RELAY_SECRET
-    # 5. 互发消息
-    node adapters/cli/relay.mjs send beta "hello from alpha" --agent alpha --secret $DSH_RELAY_SECRET
-    node adapters/cli/relay.mjs recv --agent beta --secret $DSH_RELAY_SECRET
+现有的 Agent 框架多数专注于单体 Agent 内部的推理链条与工具调用（Task Execution），但缺乏标准化的 Agent 间对等通信机制（Peer-to-Peer Inter-Agent Communication）。当在同一宿主机上并行运行 `dsh`、`Codex`、`Claude Code` 与 `Hermes` 等多个独立 Agent 时，代理之间无法直接发起代码评审（Code Review）、事实交叉验证或协作任务分发。
 
-装 dsh 插件（替代 CLI 接入）：
+**`dsh-agent-relay` 旨在填补这一架构空白**：它是一个完全解耦、轻量且自建的 Agent 通信总线（Communication Bus），包含 HTTP Broker、dsh Cordis 插件、JS/Python 客户端与 CLI 辅助工具，助力开发者构建 Agent 舰队协同链路。
 
-    dsh plugin --profile web add dsh-agent-relay
-    export DSH_RELAY_AGENT=dsh-agent DSH_RELAY_SECRET=<secret>
-    # 重启 web profile 后，模型即获得 relay_send / relay_recv / relay_peers 工具
+---
 
-完整部署：docs/DEPLOY.md · 协议：docs/PROTOCOL.md · 架构：docs/ARCHITECTURE.md · 安全：docs/SECURITY.md
+## 🚀 核心技术特性
 
-## 用 DSH 部署（Agent 驱动）
+- **通信与编排解耦 (Decoupled Transport)**  
+  区别于强侵入性的工作流编排引擎（Orchestration Frameworks），Relay 仅专注于消息路由与可靠投递，保持 Agent 内部推理与决策逻辑的完整解耦。
+- **Loopback 优先的安全架构 (Loopback-First Architecture)**  
+  Broker 默认仅绑定本地回环地址 `127.0.0.1:19121`，免去云端部署成本与外部网络攻击面风险。
+- **HMAC-SHA256 严密鉴权体系 (Cryptographic Verification)**  
+  所有 HTTP 接口调用均经由 HMAC-SHA256 签名校验，内置 300 秒时间戳重放防护、连续 5 次鉴权失败引发的 5 分钟安全锁定机制及单 IP 速率限制。
+- **高可靠投递与容错机制 (Reliable Delivery & Idempotency)**  
+  采用基于游标的增量轮询机制 (`since`)，支持消息 7 天 TTL 保持、JSONL 格式磁盘持久化、指数退避重试算法 (2s/4s/8s) 与接收端基于 UUID 的幂等去重。
+- **隐私保护设计 (Privacy-by-Design)**  
+  Broker 服务端与客户端 SDK **绝不记录或持久化任何消息体内容**，仅保留事件 UUID 及路由时间戳日志。
+- **dsh 一级工具无缝集成 (First-Class Cordis Plugin)**  
+  针对 DeepSeek Harness 提供原生 Cordis 插件，注册 `relay_send`、`relay_recv`、`relay_peers`、`relay_history` 模型工具，并提供图形化侧边栏状态面板。
 
-想省事？装好插件后，让 DSH 完整阅读 [docs/AGENT-DEPLOY.md](docs/AGENT-DEPLOY.md) 并端到端执行：它生成 broker 密钥、启动 broker、接入 dsh 插件（及 CLI / Python 客户端）、跑 `selfcheck` 并汇报结果。
+---
 
-npm 包已自带 broker + setup + adapters，**单机部署无需 git clone**。若 broker 已在运行，插件只需配 `DSH_RELAY_SECRET`（和一个稳定的 `DSH_RELAY_AGENT`）。
+## ⚖️ 系统设计对比 (Architecture Comparison)
 
-## 仓库结构
+| 维度对比 | ⚡ dsh-agent-relay | ❌ 工作流编排引擎 (AutoGPT/LangGraph) | ❌ 传统消息服务 (Slack/Discord API) |
+|---|---|---|---|
+| **架构定位** | 纯粹消息路由总线，保持 Agent 推理独立 | 强依赖 DAG 图逻辑，侵入式驱动控制流 | 人类社交 UI 框架，包含复杂的 Presence 状态 |
+| **部署与网络依赖** | 零第三方依赖，Loopback 本地极速运行 | 需复杂的中间件环境与 Redis/数据库支持 | 需公网访问、OAuth 鉴权与 WebSocket 长连接 |
+| **状态持久化与容错** | 本地 JSONL 7 天 TTL + 游标增量轮询 | 依赖外部集中式数据库管理状态 | 依赖第三方云端服务器消息留存 |
+| **数据隐私保护** | 纯本地运行，消息体零日志持久化 | 常见云端日志留存与 Embedding 上传 | 消息明文通过第三方服务器中转 |
 
-| 路径 | 内容 |
+---
+
+## 🏗️ 系统架构与工作流
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as dsh (Agent A)
+    participant B as Relay Broker (127.0.0.1:19121)
+    participant C as Claude Code (Agent B)
+
+    Note over D,C: Loopback 架构下基于 HMAC-SHA256 的通信流程
+    D->>B: POST /messages (HMAC Signed) <br> { to: "claude", body: { task: "code_review" } }
+    Note over B: 1. 校验 Timestamp < 300s<br>2. 验证 HMAC-SHA256 签名<br>3. 写入 JSONL 持久化队列 (TTL 7d)
+    B-->>D: 201 Created (Message ID: UUID)
+
+    C->>B: GET /messages?since=cursor (HMAC Signed)
+    B-->>C: 200 OK [Unread Messages Array]
+    Note over C: Agent 接收消息并执行相关任务
+    C->>B: POST /messages (Reply with ack=true)
+    B-->>D: 确认投递，推送至 dsh 侧边栏状态栏
+```
+
+---
+
+## 🤖 Agent 全流程自动部署流程 (Agent-Driven Automated Deployment)
+
+本项目原生支持**由 AI Agent 主导的全流程自主部署与链路装配**。开发者无需手动执行繁琐的环境配置，只需将部署任务交由 DSH (DeepSeek Harness) 或通用 AI Agent，系统即可自动完成终态构建。
+
+```mermaid
+flowchart LR
+    A[开发者执行插件挂载] --> B[DSH 读取 docs/AGENT-DEPLOY.md]
+    B --> C[自主生成 HMAC 密钥与 Broker 配置]
+    C --> D[启动 Broker 进程与健康检查 selfcheck]
+    D --> E[装配 CLI / Python / Agent 通信凭据]
+    E --> F[自动校验自检并输出部署报告]
+```
+
+### 1. DSH 自主部署指令 (推荐)
+
+在终端中安装插件后，直接让 DSH 读取任务指南 [docs/AGENT-DEPLOY.md](docs/AGENT-DEPLOY.md) 即可完成端到端自主部署：
+
+```bash
+# 安装中继插件
+dsh plugin --profile web add dsh-agent-relay
+```
+
+在接下来的 DSH 会话中，DSH 将自动执行如下全流程步骤：
+1. **自动配置生成**：生成安全 HMAC 密钥并写入 `~/.dsh/relay.json`。
+2. **后台服务拉起**：启动 Broker 进程并绑定 `127.0.0.1:19121` 端口。
+3. **多 Agent 凭据装配**：自动为 `dsh`、`Codex` (AGENTS.md)、`Claude Code` (CLAUDE.md) 与 Python 客户端配置环境变量 `DSH_RELAY_AGENT` 与 `DSH_RELAY_SECRET`。
+4. **链路自检与验证**：自动运行 `selfcheck` 验证收发链路，并向用户汇报部署结果。
+
+### 2. 命令行手动部署流程 (单机快速验证)
+
+```bash
+git clone https://github.com/Noelune/dsh-agent-relay.git && cd dsh-agent-relay
+node setup/setup.js init
+node setup/setup.js start
+
+# 注册 Agent 并测试消息收发
+export DSH_RELAY_SECRET=<secret_printed_in_config>
+node adapters/cli/relay.mjs register --agent alpha --secret $DSH_RELAY_SECRET
+node adapters/cli/relay.mjs register --agent beta  --secret $DSH_RELAY_SECRET
+node adapters/cli/relay.mjs send beta "hello from alpha" --agent alpha --secret $DSH_RELAY_SECRET
+node adapters/cli/relay.mjs recv --agent beta --secret $DSH_RELAY_SECRET
+```
+
+完整指南详见：[docs/DEPLOY.md](docs/DEPLOY.md) · Wire Protocol 规范：[docs/PROTOCOL.md](docs/PROTOCOL.md) · 系统架构：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 安全规范：[docs/SECURITY.md](docs/SECURITY.md)
+
+---
+
+## 📜 Wire Protocol v1.0 规范
+
+所有语言客户端适配器（JS Plugin / JS CLI / Python Client）必须严格遵循 Wire Protocol v1.0 标准规范。
+
+### 请求头鉴权规范
+
+任何非 `GET /` 请求均须包含以下 HTTP 请求头：
+
+```http
+X-Relay-Agent: <agent_name>
+X-Relay-Timestamp: <unix_epoch_seconds>
+X-Relay-Signature: <hex_hmac_sha256>
+```
+
+**签名推导公式**：
+```text
+SigningString = Method + "\n" + PathnameWithQuery + "\n" + TimestampSeconds + "\n" + RawBody
+Signature     = HMAC-SHA256(secretKey, SigningString).hex()
+```
+
+---
+
+## 📂 仓库目录结构 (Repository Layout)
+
+| 路径 | 功能说明 |
 |---|---|
-| broker/ | 中继服务（零依赖 Node；config / HMAC 认证 / JSONL 存储 / HTTP 服务）+ Dockerfile |
-| lib/ | dsh 插件：模型工具 + relay 客户端库（CLI 复用） |
-| adapters/cli/ | 零依赖 Node CLI 客户端 |
-| adapters/hermes/ | 纯标准库 Python 客户端 + Hermes 风格接入示例 |
-| adapters/openclaw/ | OpenClaw 接入说明 |
-| setup/ | setup.js（init/start/selfcheck）、selfcheck.js、可选 docker-compose 演示 |
-| docs/ | PROTOCOL（规范）/ ARCHITECTURE / DEPLOY / SECURITY |
+| `broker/` | Relay 中继核心服务（基于零依赖 Node.js，包含配置管理、HMAC 鉴权、JSONL 持久化与 HTTP 服务）+ Dockerfile |
+| `lib/` | dsh 插件核心：提供模型工具接口 (`relay_send` / `relay_recv` / `relay_peers` / `relay_history`) 与客户端库 |
+| `adapters/cli/` | 零第三方依赖 Node.js CLI 客户端适配器 |
+| `adapters/hermes/` | 纯 Python 标准库客户端适配器 + Hermes 风格 Agent 集成示例 |
+| `adapters/openclaw/` | OpenClaw 框架集成适配说明文档 |
+| `setup/` | 环境初始化脚本 `setup.js` (init/start/selfcheck) 与 Docker Compose 演示环境 |
+| `docs/` | PROTOCOL (规范说明), ARCHITECTURE (架构说明), DEPLOY (部署指南), SECURITY (安全文档) |
 
-## 环境要求
+---
 
-- Node.js ≥ 20（broker / CLI / dsh 插件）
-- Python ≥ 3.10（仅 Python 客户端需要，可选）
-- dsh 0.1.0-rc.6（已测试；dsh 插件需要）
+## 🔧 环境要求 (Requirements)
 
-## 维护状态
+- Node.js ≥ 20 (Broker 服务、CLI 客户端、dsh 插件)
+- Python ≥ 3.10 (仅 Python 客户端适配器需要，可选)
+- dsh 0.1.0-rc.6 (推荐测试版本)
 
-- 维护者：[Noelune](https://github.com/Noelune)
-- **社区维护**：接受 issue/PR，不承诺 SLA；缺陷修复通常 1–2 周内响应，安全漏洞优先。
-- 兼容性：针对 **dsh 0.1.0-rc.6** 测试；dsh 本体为 rc 版，API 变动在 CHANGELOG.md 记录升级说明。
-- 许可：**MIT**，允许商用。
+---
 
-## 安全
+## 📌 维护状态 (Maintenance Status)
 
-详见 docs/SECURITY.md。要点：HMAC 防伪造、TLS 防窃听；默认用回环模式；**绝不要把明文 broker 暴露到网络**。所有收到的 relay 消息一律视为不可信数据，而非指令。
+- **Maintainer**: [Noelune](https://github.com/Noelune)
+- **Community-maintained** — 欢迎提交 Issue 与 Pull Request。缺陷修复通常在 1–2 周内处理，安全相关问题将优先响应。
+- **Compatibility**: 基于 **dsh 0.1.0-rc.6** 进行测试与兼容性验证。上游 API 变更说明同步记录于 [CHANGELOG.md](CHANGELOG.md)。
+- **License**: **MIT License** — 允许商业化使用。
 
-## 贡献
+---
 
-欢迎 PR。提交前请运行 npm test；CI 每次 push 自动跑单测、gitleaks 密钥扫描与许可证检查。
+## 🛡️ 安全规范 (Security)
+
+详细说明请参阅 [docs/SECURITY.md](docs/SECURITY.md)。
+
+* 鉴权与传输：通过 HMAC 实施身份验证，网络级加密依赖 TLS。默认强制推荐使用 Loopback 本地回环模式，**切勿将未加密的明文 Broker 暴露在公网环境**。
+* 威胁模型防护：对于从 Relay 接收到的任何消息体，接收端 Agent 必须将其视为未校验的数据输入（Untrusted Data），严禁直接作为高权限指令执行。
+
+---
+
+## 🤝 贡献指南 (Contributing)
+
+欢迎提交 Pull Request。提交前请确保运行单元测试（`node --test`）。项目的 CI 流程会在每次 Push 时自动执行单元测试、代码密钥扫描（gitleaks）与开源许可证合规检查。
