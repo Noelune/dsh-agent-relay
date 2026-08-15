@@ -84,7 +84,12 @@ const ctx = {
   },
 }
 
-applyPlugin(ctx, { brokerUrl: `http://127.0.0.1:${port}`, agentName: 'dsh', secret: SHARED })
+applyPlugin(ctx, {
+  brokerUrl: `http://127.0.0.1:${port}`,
+  agentName: 'dsh',
+  secret: SHARED,
+  memoryCmd: `node ${process.cwd()}/memory-mock.mjs`,
+})
 
 const names = recorded.tools.map((t) => t.name)
 if (names.length !== 5 || !names.every((n) => ['agent_relay_send', 'agent_relay_status', 'agent_relay_history', 'agent_relay_peers', 'agent_relay_retry'].includes(n))) {
@@ -128,6 +133,22 @@ const peersTool = recorded.tools.find((t) => t.name === 'agent_relay_peers')
 const peers = await peersTool.execute()
 if (!Array.isArray(peers.peers) || !peers.peers.some((p) => p.agent === 'dsh')) { console.error('FAIL: peers missing dsh'); process.exit(1) }
 
-console.log('OK read-mode reply / write-mode preset / tools / completed')
+// ---- memory bridge: agent_relay_send with memory_query attaches context ----
+const memSend = await sendTool.execute({ target: 'alpha', message: '带记忆的请求', mode: 'read', memory_query: 'staging 服务器' }, { agent: { id: 'user-session-1' } })
+if (!memSend.message_id) { console.error('FAIL: memory send returned no message_id'); process.exit(1) }
+let memRequest = null
+for (let i = 0; i < 30; i++) {
+  await new Promise((r) => setTimeout(r, 250))
+  const inbox = await alpha.pull({ limit: 10 })
+  memRequest = inbox.find((m) => m.kind === 'request' && m.message_id === memSend.message_id)
+  if (memRequest) break
+}
+if (!memRequest) { console.error('FAIL: memory request not delivered'); process.exit(1) }
+if (!memRequest.context || !memRequest.context.includes('共享记忆摘录') || !memRequest.context.includes('staging 服务器')) {
+  console.error('FAIL: memory context not attached: ' + JSON.stringify(memRequest.context).slice(0, 120))
+  process.exit(1)
+}
+
+console.log('OK read-mode reply / write-mode preset / tools / completed / memory-bridge')
 await new Promise((resolve) => server.close(resolve))
 process.exit(0)

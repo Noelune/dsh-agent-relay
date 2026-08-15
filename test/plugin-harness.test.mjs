@@ -28,6 +28,7 @@ function runHarness() {
       cpSync(join(repoRoot, 'test-fixtures', 'dsh-tools-stub', 'index.js'), join(stubDir, 'index.js'))
       writeFileSync(join(stubDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-tools', version: '0.0.0-stub', type: 'module', main: 'index.js' }))
       cpSync(join(repoRoot, 'test-fixtures', 'plugin-harness-run.mjs'), join(dir, 'run.mjs'))
+      cpSync(join(repoRoot, 'test-fixtures', 'memory-mock.mjs'), join(dir, 'memory-mock.mjs'))
 
       const child = spawn(process.execPath, ['run.mjs'], { cwd: dir, encoding: 'utf8' })
       let stdout = ''
