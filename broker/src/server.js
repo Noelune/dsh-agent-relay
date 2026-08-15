@@ -1,12 +1,19 @@
 /**
- * HTTP server implementing the dsh-agent-relay wire protocol v1.0.
- * See docs/PROTOCOL.md — this file is the reference implementation.
+ * HTTP server implementing the dsh-agent-relay wire protocol.
+ * See docs/PROTOCOL.md (v1) and docs/PROTOCOL-V2.md (v2) — this file is the
+ * reference implementation.
  */
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, randomBytes } from 'node:crypto'
 import { normalizeEnvelope } from './store.js'
 import { MAX_LEASE_SECONDS } from './config.js'
+import {
+  PROTOCOL_VERSION as V2_VERSION,
+  SIGNATURE_HEADERS as V2_HEADERS,
+  MAX_CLOCK_SKEW_SECONDS as V2_SKEW,
+  verifySignature as verifyV2Signature,
+} from './protocol.js'
 
 const require = createRequire(import.meta.url)
 
@@ -18,6 +25,11 @@ const BROKER_NAME = 'dsh-agent-relay'
 const BROKER_VERSION = require('../package.json').version
 const HEARTBEAT_TTL_SECONDS = 90
 const MAX_BODY_BYTES = 1024 * 1024
+
+/** 32-hex-char id (matches the self-use broker's uuid.uuid4().hex). */
+function cryptoRandomHex(bytes = 16) {
+  return randomBytes(bytes).toString('hex')
+}
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body)
@@ -48,6 +60,39 @@ function canSend(config, from, to) {
   const entry = config.agents?.[from]
   if (entry && entry.allowedTargets) return entry.allowedTargets.includes(to)
   return true
+}
+
+/** A v2 request is identified by the presence of its agent header. */
+function isV2Request(req) {
+  return req.headers[V2_HEADERS.agent] !== undefined
+}
+
+/**
+ * Authenticate a v2 request (X-Agent-Relay-* headers, v2 signature scheme).
+ * The agent's secret is the per-agent secret when configured, else the shared
+ * secret (v1 fallback). Mirrors the self-use broker's `_authenticated_payload`.
+ */
+function verifyV2Request(req, rawBody, config) {
+  const agent = String(req.headers[V2_HEADERS.agent] || '').trim().toLowerCase()
+  const timestamp = req.headers[V2_HEADERS.timestamp] || ''
+  const signature = req.headers[V2_HEADERS.signature] || ''
+  if (!agent || !timestamp || !signature) {
+    return { ok: false, status: 401, code: 'unauthenticated', message: 'missing v2 authentication headers' }
+  }
+  const entry = config.agents?.[agent]
+  const secret = entry?.secret ?? config.secret
+  if (!secret) {
+    return { ok: false, status: 401, code: 'unknown_agent', message: 'agent is not configured' }
+  }
+  const ts = Number(timestamp)
+  if (!Number.isFinite(ts) || Math.abs(Math.floor(Date.now() / 1000) - ts) > V2_SKEW) {
+    return { ok: false, status: 401, code: 'unauthenticated', message: 'timestamp skew' }
+  }
+  const body = Buffer.from(rawBody || '', 'utf8')
+  if (!verifyV2Signature(agent, secret, req.method ?? 'GET', req.url ?? '/', timestamp, body, signature)) {
+    return { ok: false, status: 401, code: 'unauthenticated', message: 'invalid signature' }
+  }
+  return { ok: true, agent }
 }
 
 function readBody(req) {
@@ -100,7 +145,22 @@ export function createBrokerServer({ config, store, auth }) {
         return
       }
 
-      const verdict = auth.check(req, rawBody)
+      // Public liveness + protocol metadata (v2). No auth.
+      if (req.method === 'GET' && path === '/healthz') {
+        const now = Math.floor(Date.now() / 1000)
+        const peers = store.listPeers(now, HEARTBEAT_TTL_SECONDS).map((p) => p.agent)
+        sendJson(res, 200, {
+          ok: true,
+          protocol_version: V2_VERSION,
+          broker: BROKER_NAME,
+          version: BROKER_VERSION,
+          storage: store.storage,
+          agents: [...new Set([...peers, ...Object.keys(config.agents ?? {})])].sort(),
+        })
+        return
+      }
+
+      const verdict = isV2Request(req) ? verifyV2Request(req, rawBody, config) : auth.check(req, rawBody)
       if (!verdict.ok) {
         sendJson(res, verdict.status, errorBody(verdict.code, verdict.message))
         return
