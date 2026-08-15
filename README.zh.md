@@ -10,7 +10,7 @@
 Agent 框架给每个 Agent 一张"嘴"，却没有"对讲机"。dsh、Codex、Claude、Hermes 共处一台机器时，彼此之间没有互发消息的通道——除非你自己搭。**dsh-agent-relay 就是这条通道**：一个完整可部署的 starter-kit（broker + dsh 插件 + CLI 客户端 + Python 客户端 + setup 脚本），任何人都能在几分钟内部署。
 
 - **不是编排引擎**：不管 workflow/DAG/调度，只负责"把消息送到"。
-- **不是记忆系统**：不落库消息内容（除未读排队外）。共享记忆请用 [unified-agent-memory](https://github.com/Noelune/unified-agent-memory)。
+- **不是记忆系统**：消息只存在于 TTL 限定期限的投递队列（默认 7 天，JSONL 保证重启不丢）——不是持久化知识库。共享记忆请用 [unified-agent-memory](https://github.com/Noelune/unified-agent-memory)。
 - **不是聊天服务器**：没有房间概念，只有在线/离线心跳。
 
 ## 特性
@@ -20,7 +20,7 @@ Agent 框架给每个 Agent 一张"嘴"，却没有"对讲机"。dsh、Codex、C
 - **HMAC-SHA256 认证**：时间戳防重放、连续失败 5 次锁定 5 分钟、按 IP 限流。
 - **可靠投递**：增量轮询游标、7 天 TTL、JSONL 落盘重启不丢、2/4/8s 退避重试、消息 id 幂等（发送端重试 + 接收端去重）。
 - **dsh 一等公民**：cordis 插件注册 relay_send / relay_recv / relay_peers / relay_history 模型工具，另附可选侧边栏状态面板。
-- **隐私设计**：broker 与插件只记 id 与事件，不记消息内容。
+- **隐私设计**：消息内容绝不写入应用日志；broker 只在 TTL 限定期限的队列中保留（默认 7 天）用于投递，插件只记内存 id 级历史。
 - **分布式（可选进阶）**：一台 broker、多台机器，文档强制要求 TLS。
 
 ## 快速开始（5 步，单机）

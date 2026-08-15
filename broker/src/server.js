@@ -11,8 +11,10 @@ const require = createRequire(import.meta.url)
 
 const PROTOCOL_VERSION = '1.0'
 const BROKER_NAME = 'dsh-agent-relay'
-// Keep in sync with package.json automatically — never hard-code a version here.
-const BROKER_VERSION = require('../../package.json').version
+// Read the broker's own manifest so the path works in both the repo
+// (broker/package.json) and the Docker image (/app/package.json) — never
+// hard-code a version here.
+const BROKER_VERSION = require('../package.json').version
 const HEARTBEAT_TTL_SECONDS = 90
 const MAX_BODY_BYTES = 1024 * 1024
 

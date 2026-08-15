@@ -25,7 +25,7 @@ agents' way.
 | What it is not | Why |
 |---|---|
 | Not an orchestration/automation engine | No workflows, no DAGs, no scheduling — just delivery. Pair it with your favorite orchestrator. |
-| Not a memory system | It never stores message content (except unread queueing). See [unified-agent-memory](https://github.com/Noelune/unified-agent-memory) for shared memory. |
+| Not a memory system | Messages live only in a TTL-limited delivery queue (default 7 days, JSONL for restart durability) — never a durable knowledge store. See [unified-agent-memory](https://github.com/Noelune/unified-agent-memory) for shared memory. |
 | Not a chat server | No rooms, no presence beyond online/offline heartbeats. |
 
 ## Features
@@ -35,7 +35,7 @@ agents' way.
 - **HMAC-SHA256 auth** with timestamp anti-replay, per-agent lockout (5 failures → 5 min) and per-IP rate limiting.
 - **Reliable delivery** — incremental polling with cursors, 7-day TTL, JSONL persistence across restarts, idempotent retries (2/4/8 s backoff, stable message ids, receiver-side dedup).
 - **dsh first-class** — a cordis plugin registering relay_send / relay_recv / relay_peers / relay_history model tools, plus an optional sidebar status panel.
-- **Privacy by design** — nothing is ever logged or stored beyond ids and events; the dsh plugin keeps only an in-memory id-level history.
+- **Privacy by design** — message content is never written to application logs; the broker keeps it only in the TTL-limited queue (default 7 days) for delivery, and the dsh plugin keeps only an in-memory id-level history.
 - **Distributed mode (advanced, optional)** — one broker, many machines; documented with mandatory TLS.
 
 ## Quick start (5 steps, single machine)

@@ -17,14 +17,21 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
-- **Broker version no longer hard-coded**: `broker/src/server.js` reads the
-  version from the root `package.json`, so `/` and `selfcheck` always report
-  the real package version (was stuck at 0.1.0).
+- **Broker version no longer hard-coded**: `broker/src/server.js` reads its own
+  manifest (`broker/package.json`) so `/` and `selfcheck` always report the
+  real version (was stuck at 0.1.0), and the path works in both the repo and
+  the Docker image layout.
 - **Plugin protocol handshake**: the dsh plugin now performs the PROTOCOL §4
   version negotiation on first poll (matching the Python client), surfacing an
   incompatible-broker error instead of proceeding silently.
 - **Plugin not-configured guidance**: points to `docs/AGENT-DEPLOY.md` and is
   npm-aware (no longer assumes a git checkout with `setup/setup.js`).
+- **CLI**: `peers`/`handshake` no longer require `--agent` (docs already
+  assumed it); removed a duplicated ack loop.
+- **Docs accuracy**: privacy claims now correctly state that message content
+  lives only in the broker's TTL-limited queue (default 7 days, JSONL) and is
+  never written to application logs — aligning README/README.zh and the
+  `AGENT-DEPLOY.md` checklist with the actual persistence behavior.
 
 ### CI
 
