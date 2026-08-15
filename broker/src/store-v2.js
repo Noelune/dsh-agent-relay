@@ -367,6 +367,31 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     }
   }
 
+  /** Requests that failed or expired and have not yet produced a notice. */
+  function getFailedToNotify() {
+    return [...messages.values()].filter(
+      (m) => m.kind === 'request' && (m.status === STATUS.FAILED || m.status === STATUS.EXPIRED) && m.notified_at == null,
+    )
+  }
+
+  /** Mark a message as notified exactly once. Returns false if already notified. */
+  function markNotified(messageId, now) {
+    const m = messages.get(String(messageId))
+    if (!m || m.notified_at != null) return false
+    m.notified_at = now
+    persistAll()
+    return true
+  }
+
+  /** Non-terminal messages targeting `agent` (for admin/status). */
+  function stuckFor(agent, now, limit = 50) {
+    return [...messages.values()]
+      .filter((m) => m.target === agent && [STATUS.QUEUED, STATUS.LEASED, STATUS.FAILED, STATUS.EXPIRED].includes(m.status) && m.created_at >= now - 7 * 86400)
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, Math.max(1, Math.min(Number(limit) || 50, 100)))
+      .map((m) => ({ ...summarize(m), body_preview: String(m.body).slice(0, 120) }))
+  }
+
   function close() {
     if (maintenanceTimer) { clearInterval(maintenanceTimer); maintenanceTimer = null }
     if (db) { try { db.close() } catch {} db = null }
@@ -383,6 +408,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   load()
   if (persist) cleanup(Date.now() / 1000)
   return {
-    create, get, pull, ack, requeue, cancel, statusFor, recentFor, queryMessages, cleanup, close,
+    create, get, pull, ack, requeue, cancel, statusFor, recentFor, queryMessages,
+    getFailedToNotify, markNotified, stuckFor, cleanup, close,
   }
 }

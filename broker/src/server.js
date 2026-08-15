@@ -126,6 +126,24 @@ function v2PublicMessage(m) {
   return result
 }
 
+/**
+ * v2 per-mode ACL (self-use compatible). An agent without a config entry may
+ * send to anyone (v1-compatible permissive default); with an entry, the mode's
+ * whitelist applies — write defaults to closed (empty allowed_write_targets).
+ */
+function v2CanSend(config, from, to, mode) {
+  const entry = config.agents?.[from]
+  if (!entry) return true
+  let list
+  if (mode === 'write') list = entry.allowedWriteTargets ?? []
+  else if (mode === 'continue') list = entry.allowedContinueTargets ?? entry.allowedTargets
+  else list = entry.allowedReadTargets ?? entry.allowedTargets
+  if (list == null) return true // no ACL restriction → allow all (v1 default)
+  return list.includes(to)
+}
+
+const NOTIFY_FAILED_PREFIX = '[Relay] 你的内部协作消息未能送达'
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0
@@ -154,6 +172,39 @@ function readBody(req) {
  * @param {object} [deps.storeV2] - transitional v2 message store (Phase 1)
  */
 export function createBrokerServer({ config, store, auth, storeV2 = createV2Store({ dataDir: config.dataDir, persist: config.persist, leaseSeconds: config.leaseSeconds, maxAttempts: config.maxAttempts }) }) {
+  /**
+   * When a request exhausts its attempts or expires, send an "undelivered"
+   * reply back to the origin so the requester learns the peer never processed
+   * it. Guarded by notified_at so each request produces at most one notice.
+   */
+  function notifyFailedSenders() {
+    if (config.notifyFailedToSender === false) return
+    const now = Date.now() / 1000
+    for (const row of storeV2.getFailedToNotify()) {
+      if (!storeV2.markNotified(row.message_id, now)) continue
+      const reason = row.status === 'expired'
+        ? '原因: 消息在队列中过期，对端从未处理'
+        : `原因: ${String(row.last_error || 'unknown').slice(0, 300)}`
+      const body = String(row.body || '')
+      const notice = `${NOTIFY_FAILED_PREFIX}：\n目标 agent: ${row.target}\n尝试次数: ${row.attempts}/${config.maxAttempts}\n${reason}\n\n原始消息（前 ${Math.min(body.length, 400)} 字）：\n${body.slice(0, 400)}`
+      storeV2.create({
+        message_id: cryptoRandomHex(),
+        root_id: row.root_id,
+        parent_id: row.message_id,
+        origin: row.target,
+        target: row.origin,
+        kind: 'reply',
+        body: notice,
+        session_ref: row.session_ref ?? '',
+        created_at: now,
+        expires_at: now + 3600,
+        execution_mode: row.execution_mode || 'read',
+        context: '',
+        topic: row.topic || '',
+      }, `undelivered:${row.message_id}`)
+    }
+  }
+
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
@@ -241,13 +292,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
               sendJson(res, 400, errorBody('bad_request', 'execution_mode must be read, continue, or write'))
               return
             }
-            if (executionMode === 'write') {
-              // Phase 2: workspace isolation / write lease not built yet — refuse.
-              sendJson(res, 403, errorBody('forbidden', 'write mode is not enabled yet'))
-              return
-            }
-            const allowed = config.agents?.[origin]?.allowedTargets
-            if (allowed && !allowed.includes(target)) {
+            if (!v2CanSend(config, origin, target, executionMode)) {
               sendJson(res, 403, errorBody('forbidden', `target is not allowed for ${executionMode} mode`))
               return
             }
@@ -320,6 +365,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
             leaseSeconds = Math.max(15, Math.min(Math.floor(raw), 3600))
           }
           const messages = storeV2.pull(agent, Date.now() / 1000, { limit, leaseSeconds })
+          notifyFailedSenders() // surface expired/failed requests to their senders
           sendJson(res, 200, { messages: messages.map(v2PublicMessage) })
           return
         }
@@ -348,6 +394,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
             sendJson(res, status, errorBody(err.code ?? 'bad_request', err.message))
             return
           }
+          notifyFailedSenders() // a retry may have just exhausted the attempts
           sendJson(res, 200, { ok: true })
           return
         }
@@ -411,6 +458,22 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
             topic: parsed.topic,
             since,
           })
+          sendJson(res, 200, { agent, messages })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/admin/status') {
+          const parsed = parseJsonObject(rawBody)
+          if (!parsed) {
+            sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+            return
+          }
+          if (parsed.agent !== undefined && String(parsed.agent).trim().toLowerCase() !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'agent does not match authenticated identity'))
+            return
+          }
+          const limit = Number.isFinite(Number(parsed.limit)) ? Math.max(1, Math.min(Math.floor(Number(parsed.limit)), 100)) : 50
+          const messages = storeV2.stuckFor(agent, Date.now() / 1000, limit)
           sendJson(res, 200, { agent, messages })
           return
         }

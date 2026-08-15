@@ -142,9 +142,9 @@ Body: a v2 envelope subset (§2). Rules:
 - `body` non-empty, ≤ 48 000 chars (Unicode code points), and `idempotency_key` non-empty → else `400`.
 - `ttl_seconds` clamped to `[60, 3600]` (default 3600).
 - **request**: `execution_mode` must be `read|continue|write`; the target must
-  be allowed by the sender's ACL for that mode; `write` mode is currently
-  refused (`403`) until workspace isolation ships (Phase 6 of the migration).
-  A fresh `root_id` is generated.
+  be allowed by the sender's **per-mode ACL** for that mode (see §5.1). Write is
+  closed by default (`allowed_write_targets` empty). A fresh `root_id` is
+  generated.
 - **reply**: `parent_id` is required; the parent must exist (`404` if not) and
   the reply's `(origin, target)` must match the parent's `(target, origin)`
   (`403` otherwise). `root_id`, `session_ref`, `execution_mode`, `topic` are
@@ -198,6 +198,37 @@ body**. `since` is a `created_at` cutoff (epoch seconds).
   message to `queued` (resets `attempts`). `404` if not requeue-able.
 - `POST /v1/admin/cancel` — `{ "message_id" }`; marks a non-terminal message
   `completed` so it is never delivered. `404` if not cancellable.
+- `POST /v1/admin/status` — `{ "agent"?, "limit"? }`; lists non-terminal messages
+  targeting the agent (`queued`/`leased`/`failed`/`expired`, last 7 days) with a
+  `body_preview`, so an operator can decide what to requeue/cancel.
+
+### 5.1 Per-mode ACL
+
+Each configured agent may declare separate target whitelists per execution mode:
+
+```yaml
+broker:
+  secret: ...
+agents:
+  alpha:
+    allowed_targets: [beta]              # legacy default (read + continue)
+    allowed_read_targets: [beta]         # optional; defaults to allowed_targets
+    allowed_continue_targets: [beta]     # optional; defaults to allowed_targets
+    allowed_write_targets: []            # write is OPT-IN; empty = closed
+```
+
+- An agent **without** a config entry may send to anyone (v1-compatible default).
+- An agent **with** an entry is restricted to the whitelist for the requested
+  mode; write is closed unless explicitly granted.
+- `POST /v1/messages` returns `403` when the target is not allowed for the mode.
+
+### 5.2 Undelivered notices
+
+When a `request` exhausts its attempts (`failed`) or expires without being
+acknowledged, the broker creates an `undelivered` reply back to the origin so
+the requester learns the peer never processed it. Exactly one notice per request
+(guarded by `notified_at`), idempotent via `idempotency_key: undelivered:<id>`.
+Controlled by `broker.notifyFailedToSender` (default `true`).
 
 ## 6. Errors
 
@@ -207,7 +238,7 @@ Uniform body: `{ "error": { "code": "<machine_code>", "message": "<human>" } }`
 |---|---|---|
 | 400 | `bad_request` | Malformed body, invalid kind, missing body/idempotency key, invalid execution_mode, invalid limit/lease/since |
 | 401 | `unauthenticated` / `unknown_agent` | Missing/invalid v2 signature, timestamp skew, unknown agent |
-| 403 | `forbidden` | `origin` mismatch, ACL denies the target, write mode not enabled, reply not authorized, agent mismatch, ack by non-recipient |
+| 403 | `forbidden` | `origin` mismatch, per-mode ACL denies the target, reply not authorized, agent mismatch, ack by non-recipient |
 | 404 | `no_such_message` | Reply parent not found, requeue/cancel on a non-eligible message |
 
 ## 7. State machine & lifecycle

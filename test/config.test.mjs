@@ -64,6 +64,33 @@ test('config: accepts optional per-agent secrets alongside routing ACLs', () => 
       beta: { secret: 'beta-secret' },
     },
   }))
-  assert.deepEqual(config.agents.alpha, { secret: 'alpha-secret', allowedTargets: ['beta'] })
-  assert.deepEqual(config.agents.beta, { secret: 'beta-secret', allowedTargets: null })
+  assert.deepEqual(config.agents.alpha, {
+    secret: 'alpha-secret',
+    allowedTargets: ['beta'],
+    allowedReadTargets: ['beta'],
+    allowedContinueTargets: ['beta'],
+    allowedWriteTargets: [],
+  })
+  assert.deepEqual(config.agents.beta, {
+    secret: 'beta-secret',
+    allowedTargets: null,
+    allowedReadTargets: null,
+    allowedContinueTargets: null,
+    allowedWriteTargets: [],
+  })
+})
+
+test('config: per-mode ACL — write closed by default, read/continue from allowed_targets', () => {
+  const config = normalizeConfig(baseConfig({
+    agents: {
+      alpha: { allowed_targets: ['beta'], allowed_write_targets: ['gamma'] },
+      delta: { allowed_read_targets: ['beta'], allowed_continue_targets: ['beta', 'gamma'], allowed_write_targets: ['beta'] },
+    },
+  }))
+  assert.deepEqual(config.agents.alpha.allowedReadTargets, ['beta'])
+  assert.deepEqual(config.agents.alpha.allowedContinueTargets, ['beta'])
+  assert.deepEqual(config.agents.alpha.allowedWriteTargets, ['gamma'])
+  assert.deepEqual(config.agents.delta.allowedReadTargets, ['beta'])
+  assert.deepEqual(config.agents.delta.allowedContinueTargets, ['beta', 'gamma'])
+  assert.deepEqual(config.agents.delta.allowedWriteTargets, ['beta'])
 })

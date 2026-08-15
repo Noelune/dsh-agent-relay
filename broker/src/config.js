@@ -83,6 +83,7 @@ export function normalizeConfig(loaded) {
     lockMinutes: Number(s.lockMinutes ?? 5),
     leaseSeconds: Number(b.leaseSeconds ?? 600),
     maxAttempts: Number(b.maxAttempts ?? 3),
+    notifyFailedToSender: booleanConfig(b.notifyFailedToSender, true, 'broker.notifyFailedToSender'),
     agents: normalizeAgents(loaded.agents),
   }
   if (b.tls !== undefined) {
@@ -116,6 +117,11 @@ function validateInteger(value, minimum, name, maximum = Number.MAX_SAFE_INTEGER
  * Per-agent routing ACL. An agent with `allowed_targets` may only send to
  * those targets; an agent WITHOUT an entry (or with `allowed_targets: null`)
  * may send to anyone (v1.0 default, backward compatible).
+ *
+ * v2 per-mode ACL (self-use compatible):
+ *   allowed_read_targets      — read  mode whitelist (defaults to allowed_targets)
+ *   allowed_continue_targets  — continue mode whitelist (defaults to allowed_targets)
+ *   allowed_write_targets     — write mode whitelist (default EMPTY = write closed)
  */
 function normalizeAgents(loaded) {
   const out = {}
@@ -124,9 +130,24 @@ function normalizeAgents(loaded) {
     if (targets !== undefined && targets !== null && !Array.isArray(targets)) {
       throw new Error(`invalid agents.${name}.allowed_targets: expected an inline array`)
     }
+    const read = cfg?.allowed_read_targets
+    const cont = cfg?.allowed_continue_targets
+    const write = cfg?.allowed_write_targets
+    for (const [field, value] of [['allowed_read_targets', read], ['allowed_continue_targets', cont], ['allowed_write_targets', write]]) {
+      if (value !== undefined && value !== null && !Array.isArray(value)) {
+        throw new Error(`invalid agents.${name}.${field}: expected an inline array`)
+      }
+    }
     const secret = cfg?.secret === undefined ? null : String(cfg.secret)
     if (secret !== null && !secret) throw new Error(`invalid agents.${name}.secret: must not be empty`)
-    out[name] = { secret, allowedTargets: Array.isArray(targets) ? targets.map(String) : null }
+    const legacy = Array.isArray(targets) ? targets.map(String) : null
+    out[name] = {
+      secret,
+      allowedTargets: legacy,
+      allowedReadTargets: Array.isArray(read) ? read.map(String) : legacy,
+      allowedContinueTargets: Array.isArray(cont) ? cont.map(String) : legacy,
+      allowedWriteTargets: Array.isArray(write) ? write.map(String) : [],
+    }
   }
   const isolated = Object.values(out).some((agent) => agent.secret !== null)
   if (isolated && Object.entries(out).some(([, agent]) => agent.secret === null)) {

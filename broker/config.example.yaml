@@ -12,7 +12,21 @@ broker:
   persist: true            # persistence (survives restarts)
   storage: sqlite          # sqlite by default; set jsonl for legacy compatibility
   dataDir: ./data          # where relay.db (or messages.jsonl) lives
+  leaseSeconds: 600        # v2 pull lease default
+  maxAttempts: 3           # v2 delivery attempts before a request fails
+  notifyFailedToSender: true  # send an "undelivered" reply when a request fails
 
 security:
   lockAfterFailures: 5     # consecutive auth failures before locking
   lockMinutes: 5           # lock duration
+
+# Optional v2 per-mode routing ACL. An agent with an entry may only send to
+# the targets in its mode's whitelist; write is opt-in (empty = closed).
+# Agents without an entry may send to anyone (v1-compatible default).
+# agents:
+#   alpha:
+#     secret: <hex>                # per-agent secret (enables isolated auth)
+#     allowed_read_targets: [beta]
+#     allowed_continue_targets: [beta]
+#     allowed_write_targets: []    # write closed unless granted
+
