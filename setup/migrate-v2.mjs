@@ -10,7 +10,7 @@
  * the repo v2 store's `relay_v2_messages` table (preserving state, attempts,
  * timestamps, idempotency). Requires Node with built-in SQLite (>= 22.13).
  */
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 
@@ -44,6 +44,7 @@ function main() {
     process.exit(2)
   }
   const targetPath = join(args.dataDir, 'relay-v2.db')
+  mkdirSync(args.dataDir, { recursive: true })
   const { DatabaseSync } = require('node:sqlite')
 
   const src = new DatabaseSync(args.source, { readOnly: true })
