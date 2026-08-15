@@ -139,6 +139,27 @@ export DSH_RELAY_SECRET=<same-secret-everywhere>
 
 ---
 
+## v1.1 configuration (optional)
+
+The broker ships with lease-based reliable delivery enabled by default:
+
+- `broker.leaseSeconds` (default **600**) — how long a pulled message is leased before it is
+  re-queued for another attempt.
+- `broker.maxAttempts` (default **3**) — retries allowed before a message is marked `failed`.
+
+Per-agent routing ACL is optional and off by default (v1.0 compatible). To restrict who may send to
+whom, add an `agents` block to `broker/config.yaml`:
+
+```yaml
+agents:
+  alpha:
+    allowed_targets: [beta, gamma]
+```
+
+An agent with `allowed_targets` may only send to the listed names (else `403 forbidden`); an agent
+without an entry may send to anyone. The dsh plugin records completed replies as receipts
+(`~/.dsh-agent-relay-receipts.json`) so a restarted agent replays, not re-runs, finished requests.
+
 ## Containerized deployment (optional)
 
 ```sh

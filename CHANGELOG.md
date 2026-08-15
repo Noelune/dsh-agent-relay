@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] — 2026-08-15
+
+### Added — v1.1 reliable delivery (backward compatible, protocol stays 1.0)
+
+- **Lease-based delivery state machine**: `POST /v1/pull` leases queued messages
+  (`queued → leased`), `POST /v1/ack` finalizes (`completed → done`) or re-queues
+  (`retry`, attempts+1, over `maxAttempts` → `failed`); expired leases are
+  re-queued by a sweep. Config: `broker.leaseSeconds` (600), `broker.maxAttempts` (3).
+- **Request/reply correlation**: optional envelope fields `kind`
+  (`message|request|reply`), `rootId`, `parentId`; broker-visible `status`,
+  `attempts`, `leaseUntil`.
+- **History/status endpoints**: `POST /v1/status` (batch lookup),
+  `POST /v1/recent`, `POST /v1/messages/query` (read-only filtered search).
+- **Routing ACL**: optional `agents.<name>.allowed_targets` whitelist in
+  `broker/config.yaml`; disallowed sends return `403 forbidden`; absent entry =
+  allow all (v1.0 default).
+- **Client support**: JS `RelayClient` (`pull`/`ackOutcome`/`status`/`recent`/`query`
+  + `kind`/`rootId`/`parentId` on `send`), CLI subcommands
+  (`pull`/`ack`/`status`/`recent`/`query`), Python client equivalents.
+- **Plugin receipts**: the dsh plugin polls via lease-pull and persists completed
+  replies to `~/.dsh-agent-relay-receipts.json` (TTL 1 day, atomic write); a
+  redelivered request whose id is in the receipts is replayed (idempotent) and
+  acked `completed` — never re-run after a restart. `relay_send` accepts `replyTo`.
+- **Docs**: PROTOCOL v1.1 extension, DEPLOY v1.1 config, SECURITY ACL, README/zh,
+  AGENT-DEPLOY checklist.
+
+### Tests
+
+- `test/lease.test.mjs` (state machine, lease expiry, attempts, status/recent/query)
+  and `test/acl.test.mjs` (whitelist allow/deny + v1.1 pull/ack round trip).
+  29/29 green.
+
 ## [0.2.0] — 2026-08-15
 
 ### Added

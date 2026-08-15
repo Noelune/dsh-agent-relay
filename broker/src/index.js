@@ -32,6 +32,7 @@ const store = createStore({
   ttlDays: config.messageTtlDays,
   persist: config.persist,
   dataDir: resolve(BROKER_DIR, config.dataDir),
+  maxAttempts: config.maxAttempts,
 })
 const auth = createAuthenticator({
   secret: config.secret,

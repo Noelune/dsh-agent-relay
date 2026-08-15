@@ -42,6 +42,11 @@ Commands:
   peers                        list registered agents and online status
   watch                        poll forever, printing new messages as they arrive
   handshake                    check broker version compatibility
+  pull [--limit N] [--lease S] lease queued messages (v1.1)
+  ack <id> <completed|retry>   acknowledge a leased message (v1.1)
+  status <id> [<id>...]        batch status lookup (v1.1)
+  recent [--limit N]           recent messages for this agent (v1.1)
+  query [--kind K] [--status S] [--from F] [--to T] [--limit N]   read-only search (v1.1)
 
 Options:
   --broker <url>    broker base URL   (env DSH_RELAY_BROKER_URL, default http://127.0.0.1:19121)
@@ -87,7 +92,7 @@ async function main() {
   const command = argv[0]
   const cfg = loadConfig(argv)
   // peers/handshake are read-only and do not need an agent identity.
-  const NEEDS_AGENT = new Set(['register', 'send', 'recv', 'watch'])
+  const NEEDS_AGENT = new Set(['register', 'send', 'recv', 'watch', 'pull', 'ack', 'status', 'recent', 'query'])
   if (NEEDS_AGENT.has(command) && !cfg.agent) die('missing agent name: pass --agent <name> or set DSH_RELAY_AGENT')
   if (!cfg.secret) die('missing secret: pass --secret <hex> or set DSH_RELAY_SECRET (generate with "node setup/setup.js init")')
   const client = new RelayClient({ brokerUrl: cfg.brokerUrl, agent: cfg.agent, secret: cfg.secret })
@@ -145,6 +150,41 @@ async function main() {
       }
       case 'peers': {
         print({ peers: await client.peers() })
+        return
+      }
+      case 'pull': {
+        const limit = Number(argv[argv.indexOf('--limit') + 1] ?? 50)
+        const lease = Number(argv[argv.indexOf('--lease') + 1] ?? NaN)
+        const r = await client.pull(limit, Number.isFinite(lease) ? lease : undefined)
+        print({ count: r.count ?? r.messages.length, messages: r.messages })
+        return
+      }
+      case 'ack': {
+        const id = argv[1]
+        const outcome = argv[2]
+        if (!id || (outcome !== 'completed' && outcome !== 'retry')) die('usage: node relay.mjs ack <messageId> <completed|retry>')
+        const errorArg = argv[argv.indexOf('--error') + 1]
+        print(await client.ackOutcome(id, outcome, errorArg))
+        return
+      }
+      case 'status': {
+        const ids = argv.slice(1).filter((a) => !a.startsWith('--'))
+        if (!ids.length) die('usage: node relay.mjs status <messageId> [<messageId>...]')
+        print({ messages: await client.status(ids) })
+        return
+      }
+      case 'recent': {
+        const limit = Number(argv[argv.indexOf('--limit') + 1] ?? 50)
+        print({ count: (await client.recent(limit)).length, messages: await client.recent(limit) })
+        return
+      }
+      case 'query': {
+        const filters = {}
+        for (const k of ['kind', 'status', 'from', 'to', 'limit']) {
+          const i = argv.indexOf(`--${k}`)
+          if (i !== -1 && argv[i + 1]) filters[k] = argv[i + 1]
+        }
+        print({ count: (await client.query(filters)).length, messages: await client.query(filters) })
         return
       }
       case 'watch': {

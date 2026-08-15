@@ -137,6 +137,68 @@ Stores a new `type: "ack"` envelope with `replyTo: <id>` back to the original se
 - **Acks:** optional; when `ack: true` is set on a sent envelope, the receiver SHOULD reply via the
   ack endpoint so the sender can correlate with `replyTo`.
 
+### 5.1 v1.1 additive extensions (backward compatible, protocol stays 1.0)
+
+These are **additive**: every v1.0 field and endpoint keeps its exact meaning; older clients continue
+to work unchanged. Feature revision label: **v1.1** (package 0.3.0+).
+
+**New envelope fields (all optional):**
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `"message" \| "request" \| "reply"` | Default `"message"`. `request` opens a conversation; `reply` carries `parentId`. Anything else → `400`. |
+| `rootId` | string \| null | Id of the first message in a request/reply chain. |
+| `parentId` | string \| null | For a `reply`, the id of the message being answered. |
+| `status` | string | Broker-managed: `queued` \| `leased` \| `done` \| `failed`. Not settable by clients. |
+| `attempts` | number | Broker-managed delivery attempts. |
+| `leaseUntil` | string \| null | Broker-managed lease deadline (epoch ms). |
+
+**Delivery state machine** (replaces plain polling for v1.1 clients):
+
+```
+queued →(pull) leased →(ack completed) done
+         │              └→(ack retry) queued (attempts+1; > maxAttempts → failed)
+         └→(lease expiry, leaseSweep) queued
+```
+
+Lease defaults: `leaseSeconds` **600**, `maxAttempts` **3** (both broker config, `broker.leaseSeconds` /
+`broker.maxAttempts`).
+
+**New endpoints (all HMAC-authenticated, same headers as §3):**
+
+| Endpoint | Body | Returns |
+|---|---|---|
+| `POST /v1/pull` | `{ "limit"?, "leaseSeconds"? }` (agent must match header) | `{ "messages": [...leased...], "count" }` |
+| `POST /v1/ack` | `{ "messageId", "outcome": "completed"\|"retry", "error"? }` | `{ "ok", "status", "attempts" }` (403 if not the recipient; 404 unknown id) |
+| `POST /v1/status` | `{ "messageIds": [...] }` | `{ "messages": [{id,status,attempts,ts,from,to,kind}] }` |
+| `POST /v1/recent` | `{ "limit"? }` (agent must match header) | `{ "messages": [...], "count" }` — most recent for this agent, any status, read-only |
+| `POST /v1/messages/query` | `{ "limit"?, "kind"?, "status"?, "from"?, "to"? }` | `{ "messages": [...], "count" }` — read-only filtered search |
+
+- `/v1/pull` leases queued messages (queued→leased); a leased message is not returned to anyone again
+  until its lease expires.
+- `/v1/ack` with `completed` finalizes a message; `retry` re-queues it (attempts+1, re-pullable).
+- The v1.0 `GET /messages` poll still works and now returns only `queued` messages, so a v1.0 client
+  sees new undelivered messages and never double-delivers leased/done ones.
+
+**Routing ACL (optional, v1.1):**
+
+`broker/config.yaml` may declare per-agent send whitelists:
+
+```yaml
+agents:
+  alpha:
+    allowed_targets: [beta, gamma]
+```
+
+`POST /messages` (and `/v1/messages`) returns `403 forbidden` when `from` has an `allowed_targets`
+list that does not contain `to`. An agent with **no** entry (or `allowed_targets` absent) may send to
+anyone — v1.0 default.
+
+**Receipts (client-side, v1.1):** the dsh plugin persists completed replies to
+`~/.dsh-agent-relay-receipts.json` (TTL 1 day, atomic write). On a redelivered request whose id is in
+the receipts, the plugin replays the cached reply (stable id, idempotent) and acks `completed` — it
+never re-runs a completed turn after a restart.
+
 ## 6. Errors
 
 All errors use a uniform body:

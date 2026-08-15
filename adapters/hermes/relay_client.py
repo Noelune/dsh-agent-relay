@@ -121,6 +121,9 @@ class RelayClient:
         reply_to: str | None = None,
         ack: bool = False,
         message_id: str | None = None,
+        kind: str | None = None,
+        root_id: str | None = None,
+        parent_id: str | None = None,
     ) -> dict[str, Any]:
         """Send a message; the id stays stable across internal retries."""
         payload = {
@@ -131,6 +134,12 @@ class RelayClient:
             "replyTo": reply_to,
             "ack": ack,
         }
+        if kind:
+            payload["kind"] = kind
+        if root_id:
+            payload["rootId"] = root_id
+        if parent_id:
+            payload["parentId"] = parent_id
         return self._request("POST", "/messages", payload)
 
     def recv(self, limit: int = 50) -> dict[str, Any]:
@@ -149,6 +158,38 @@ class RelayClient:
         if error:
             body["error"] = error
         return self._request(f"/messages/{message_id}/ack", body)
+
+    # -- v1.1 lease-based delivery --------------------------------------
+
+    def pull(self, limit: int = 50, lease_seconds: int | None = None) -> dict[str, Any]:
+        """Lease up to `limit` queued messages for this agent (v1.1)."""
+        body: dict[str, Any] = {"limit": limit}
+        if lease_seconds:
+            body["leaseSeconds"] = lease_seconds
+        result = self._request("POST", "/v1/pull", body)
+        return result or {"messages": [], "count": 0}
+
+    def ack_outcome(self, message_id: str, outcome: str, error: str | None = None) -> dict[str, Any]:
+        """Acknowledge a leased message: outcome 'completed' or 'retry' (v1.1)."""
+        body: dict[str, Any] = {"messageId": message_id, "outcome": outcome}
+        if error:
+            body["error"] = error
+        return self._request("POST", "/v1/ack", body)
+
+    def status(self, message_ids: list[str]) -> list[dict[str, Any]]:
+        """Batch status lookup (v1.1)."""
+        result = self._request("POST", "/v1/status", {"messageIds": list(message_ids)})
+        return result.get("messages", []) if result else []
+
+    def recent(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent messages addressed to this agent (read-only, v1.1)."""
+        result = self._request("POST", "/v1/recent", {"limit": limit})
+        return result.get("messages", []) if result else []
+
+    def query(self, **filters: Any) -> list[dict[str, Any]]:
+        """Read-only filtered search (v1.1): kind/status/from/to/limit."""
+        result = self._request("POST", "/v1/messages/query", filters)
+        return result.get("messages", []) if result else []
 
 
 if __name__ == "__main__":

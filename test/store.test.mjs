@@ -68,11 +68,21 @@ test('store: TTL sweep drops expired messages', () => {
 
 test('normalizeEnvelope: fills id/from/ts and validates', () => {
   const full = normalizeEnvelope({ id: 'x', to: 'b', from: 'a', ts: 't', type: 'message', body: {}, ack: true }, 'a', 'now')
-  assert.deepEqual(full, { id: 'x', from: 'a', to: 'b', ts: 't', type: 'message', body: {}, replyTo: null, ack: true })
+  assert.deepEqual(full, {
+    id: 'x', from: 'a', to: 'b', ts: 't', type: 'message', body: {}, replyTo: null, ack: true,
+    kind: 'message', rootId: null, parentId: null, status: 'queued', attempts: 0, leaseUntil: null,
+  })
   const short = normalizeEnvelope({ to: 'b', body: { text: 'hi' } }, 'a', 'now')
   assert.equal(short.from, 'a')
   assert.equal(short.type, 'message')
   assert.equal(short.replyTo, null)
+  assert.equal(short.status, 'queued')
+  assert.equal(short.kind, 'message')
+  const req = normalizeEnvelope({ to: 'b', kind: 'request', rootId: 'r', parentId: 'p' }, 'a', 'now')
+  assert.equal(req.kind, 'request')
+  assert.equal(req.rootId, 'r')
+  assert.equal(req.parentId, 'p')
+  assert.throws(() => normalizeEnvelope({ to: 'b', kind: 'bogus' }, 'a', 'now'), /kind must be/)
   assert.throws(() => normalizeEnvelope({}, 'a', 'now'), /to is required/)
   assert.throws(() => normalizeEnvelope(null, 'a', 'now'), /must be a JSON object/)
 })

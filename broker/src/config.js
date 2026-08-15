@@ -71,9 +71,26 @@ export function normalizeConfig(loaded) {
     dataDir: String(b.dataDir ?? './data'),
     lockAfterFailures: Number(s.lockAfterFailures ?? 5),
     lockMinutes: Number(s.lockMinutes ?? 5),
+    leaseSeconds: Number(b.leaseSeconds ?? 600),
+    maxAttempts: Number(b.maxAttempts ?? 3),
+    agents: normalizeAgents(loaded.agents),
   }
   if (!Number.isInteger(config.port) || config.port <= 0 || config.port > 65535) {
     throw new Error(`invalid broker.port: ${config.port}`)
   }
   return config
+}
+
+/**
+ * Per-agent routing ACL. An agent with `allowed_targets` may only send to
+ * those targets; an agent WITHOUT an entry (or with `allowed_targets: null`)
+ * may send to anyone (v1.0 default, backward compatible).
+ */
+function normalizeAgents(loaded) {
+  const out = {}
+  for (const [name, cfg] of Object.entries(loaded ?? {})) {
+    const targets = cfg?.allowed_targets
+    out[name] = { allowedTargets: Array.isArray(targets) ? targets.map(String) : null }
+  }
+  return out
 }
