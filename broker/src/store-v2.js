@@ -27,6 +27,8 @@ const RETENTION_SECONDS = 30 * 86400
 export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, maxAttempts = 3 }) {
   const messages = new Map() // message_id -> record
   const byIdempotency = new Map() // origin -> Map<idempotency_key, message_id>
+  const lastPullAt = new Map() // agent -> epoch seconds
+  const counters = { messages_created: 0, messages_duplicate: 0, pulls: 0, acks_completed: 0, acks_retry: 0 }
   const maxAttemptsValue = Math.max(1, Number(maxAttempts))
   const leaseSecondsValue = Math.max(15, Number(leaseSeconds))
   const jsonlPath = join(dataDir, 'relay-v2.jsonl')
@@ -192,7 +194,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
 
   function create(message, idempotencyKey) {
     const existing = idemIndex(message.origin).get(idempotencyKey)
-    if (existing) return { message_id: existing, created: false }
+    if (existing) { counters.messages_duplicate += 1; return { message_id: existing, created: false } }
     const record = {
       message_id: String(message.message_id),
       root_id: String(message.root_id ?? ''),
@@ -217,6 +219,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     }
     messages.set(record.message_id, record)
     idemIndex(record.origin).set(idempotencyKey, record.message_id)
+    counters.messages_created += 1
     appendOne(record)
     return { message_id: record.message_id, created: true }
   }
@@ -227,6 +230,8 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
 
   function pull(target, now, { limit = 8, leaseSeconds: requestedLease } = {}) {
     cleanup(now)
+    lastPullAt.set(target, now)
+    counters.pulls += 1
     const leaseUntil = now + (requestedLease ?? leaseSecondsValue)
     const out = []
     const ready = [...messages.values()]
@@ -255,7 +260,9 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       m.lease_until = null
       m.completed_at = now
       m.last_error = null
+      counters.acks_completed += 1
     } else if (outcome === 'retry') {
+      counters.acks_retry += 1
       if (m.attempts >= maxAttemptsValue) {
         m.status = STATUS.FAILED
         m.lease_until = null
@@ -392,6 +399,20 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       .map((m) => ({ ...summarize(m), body_preview: String(m.body).slice(0, 120) }))
   }
 
+  /** Per-agent queue counts (for /healthz, matching the self-use broker). */
+  function queueStats(agentNames) {
+    const out = {}
+    for (const name of agentNames ?? new Set([...messages.values()].map((m) => m.target))) {
+      out[name] = { queued: 0, leased: 0, completed: 0, failed: 0, expired: 0 }
+    }
+    for (const m of messages.values()) {
+      const q = out[m.target]
+      if (!q) continue
+      if (q[m.status] !== undefined) q[m.status] += 1
+    }
+    return out
+  }
+
   function close() {
     if (maintenanceTimer) { clearInterval(maintenanceTimer); maintenanceTimer = null }
     if (db) { try { db.close() } catch {} db = null }
@@ -409,6 +430,8 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   if (persist) cleanup(Date.now() / 1000)
   return {
     create, get, pull, ack, requeue, cancel, statusFor, recentFor, queryMessages,
-    getFailedToNotify, markNotified, stuckFor, cleanup, close,
+    getFailedToNotify, markNotified, stuckFor, queueStats, cleanup, close,
+    get lastPullAt() { return Object.fromEntries(lastPullAt) },
+    get counters() { return { ...counters } },
   }
 }

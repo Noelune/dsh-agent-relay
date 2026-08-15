@@ -53,6 +53,9 @@ test('GET /healthz is public and reports v2 protocol metadata', async () => {
   assert.equal(body.protocol_version, 2)
   assert.equal(body.broker, 'dsh-agent-relay')
   assert.ok(Array.isArray(body.agents))
+  // The self-use peers tool reads queues + last_pull_at — they must be present.
+  assert.ok(body.queues && typeof body.queues === 'object', 'healthz must include per-agent queues')
+  assert.ok(body.last_pull_at && typeof body.last_pull_at === 'object', 'healthz must include last_pull_at')
 })
 
 test('a v2-signed request to a protected endpoint authenticates', async () => {

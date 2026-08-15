@@ -232,13 +232,20 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
       if (req.method === 'GET' && path === '/healthz') {
         const now = Math.floor(Date.now() / 1000)
         const peers = store.listPeers(now, HEARTBEAT_TTL_SECONDS).map((p) => p.agent)
+        const agents = [...new Set([...peers, ...Object.keys(config.agents ?? {})])].sort()
         sendJson(res, 200, {
           ok: true,
           protocol_version: V2_VERSION,
           broker: BROKER_NAME,
           version: BROKER_VERSION,
           storage: store.storage,
-          agents: [...new Set([...peers, ...Object.keys(config.agents ?? {})])].sort(),
+          agents,
+          queues: storeV2.queueStats(agents),
+          last_pull_at: storeV2.lastPullAt,
+          counters: {
+            messages_created: storeV2.counters?.messages_created ?? 0,
+            pulls: storeV2.counters?.pulls ?? 0,
+          },
         })
         return
       }
