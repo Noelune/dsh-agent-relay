@@ -139,11 +139,11 @@ Body: a v2 envelope subset (§2). Rules:
 
 - `origin` must equal the authenticated agent → else `403`.
 - `kind` must be `request` or `reply` → else `400`.
-- `body` non-empty, ≤ 48 000 chars, and `idempotency_key` non-empty → else `400`.
+- `body` non-empty, ≤ 48 000 chars (Unicode code points), and `idempotency_key` non-empty → else `400`.
 - `ttl_seconds` clamped to `[60, 3600]` (default 3600).
 - **request**: `execution_mode` must be `read|continue|write`; the target must
   be allowed by the sender's ACL for that mode; `write` mode is currently
-  refused (`403`) until workspace isolation ships (Phase 2+ of the migration).
+  refused (`403`) until workspace isolation ships (Phase 6 of the migration).
   A fresh `root_id` is generated.
 - **reply**: `parent_id` is required; the parent must exist (`404` if not) and
   the reply's `(origin, target)` must match the parent's `(target, origin)`
@@ -158,27 +158,72 @@ Response (HTTP 200):
 { "message_id": "9f2c1a...", "created": true, "protocol_version": 2 }
 ```
 
+### `POST /v1/pull` — lease queued messages (auth)
+
+Body: `{ "agent"?, "limit"?, "lease_seconds"? }` (agent must match the
+authenticated identity). `limit` clamps to `[1, 8]`, `lease_seconds` to
+`[15, 3600]`. Leases up to `limit` queued messages addressed to the agent
+(queued → leased, `attempts` +1) and returns their public views (no
+broker-managed `status`/`attempts`). A message is not returned again until its
+lease expires or it is acked.
+
+### `POST /v1/ack` — acknowledge a leased message (auth)
+
+Body: `{ "agent"?, "message_id", "outcome": "completed"|"retry", "error"? }`.
+Only the recipient may ack (`403` otherwise). `completed` finalizes the message;
+`retry` re-queues it (`attempts`+1; over `maxAttempts` → `failed`). `error` is
+recorded (≤300 chars).
+
+### `POST /v1/status` — batch status lookup (auth)
+
+Body: `{ "agent"?, "message_ids": [...] }` (≤100 ids). Returns status for
+messages the agent is **origin or target** of; others are reported
+`not_found`.
+
+### `POST /v1/recent` — recent messages (auth)
+
+Body: `{ "agent"?, "limit"? }` (`limit` 1–50, default 20). Most recent messages
+(last 7 days) the agent was involved in, newest first. No body in the response.
+
+### `POST /v1/messages/query` — read-only search (auth)
+
+Body: `{ "agent"?, "message_id"?, "root_id"?, "origin"?, "target"?, "kind"?,
+"status"?, "topic"?, "since"?, "limit"? }`. Returns messages the agent is
+**origin or target** of (never other agents' messages), newest first, **with
+body**. `since` is a `created_at` cutoff (epoch seconds).
+
+### Admin helpers (any authenticated local agent)
+
+- `POST /v1/admin/requeue` — `{ "message_id" }`; revives a `leased`/`failed`/`expired`
+  message to `queued` (resets `attempts`). `404` if not requeue-able.
+- `POST /v1/admin/cancel` — `{ "message_id" }`; marks a non-terminal message
+  `completed` so it is never delivered. `404` if not cancellable.
+
 ## 6. Errors
 
 Uniform body: `{ "error": { "code": "<machine_code>", "message": "<human>" } }`
 
 | HTTP | `code` | Meaning |
 |---|---|---|
-| 400 | `bad_request` | Malformed body, invalid kind, missing body/idempotency key, invalid execution_mode |
+| 400 | `bad_request` | Malformed body, invalid kind, missing body/idempotency key, invalid execution_mode, invalid limit/lease/since |
 | 401 | `unauthenticated` / `unknown_agent` | Missing/invalid v2 signature, timestamp skew, unknown agent |
-| 403 | `forbidden` | `origin` mismatch, ACL denies the target, write mode not enabled, reply not authorized |
-| 404 | `no_such_message` | Reply parent not found |
+| 403 | `forbidden` | `origin` mismatch, ACL denies the target, write mode not enabled, reply not authorized, agent mismatch, ack by non-recipient |
+| 404 | `no_such_message` | Reply parent not found, requeue/cancel on a non-eligible message |
 
 ## 7. State machine & lifecycle
-
-Phase 1 implements **creation only** (message enters the `queued` state in the
-transitional v2 store). `pull` / `ack` / `status` / `expired` for v2 messages —
-and the merge of the v2 store into the unified store — are the next migration
-phases. The intended state machine (matching the self-use broker) is:
 
 ```
 queued →(pull) leased →(ack completed) completed
          │              └→(ack retry) queued (attempts+1; > maxAttempts → failed)
          └→(expires_at reached) expired
+queued/leased →(attempts exhausted, cleanup) failed
 failed / expired →(admin requeue) queued
 ```
+
+- `expires_at` is set at creation (`created_at + ttl`) and enforced by the
+  maintenance sweep (`cleanup`): an un-acked `queued`/`leased` message past its
+  deadline becomes `expired`.
+- A `queued`/`leased` message whose `attempts` reach `maxAttempts` without an
+  ack is marked `failed` so the sender can see it was not processed.
+- Terminal messages (`completed`/`expired`/`failed`) are retained for
+  **30 days**, then purged.

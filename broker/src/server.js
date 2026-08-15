@@ -106,6 +106,26 @@ function verifyV2Request(req, rawBody, config) {
   return { ok: true, agent }
 }
 
+/** Public v2 message view (excludes broker-managed status/attempt fields). */
+function v2PublicMessage(m) {
+  const result = {
+    message_id: m.message_id,
+    root_id: m.root_id,
+    parent_id: m.parent_id ?? null,
+    origin: m.origin,
+    target: m.target,
+    kind: m.kind,
+    body: m.body,
+    session_ref: m.session_ref ?? '',
+    created_at: m.created_at,
+    expires_at: m.expires_at,
+    execution_mode: m.execution_mode,
+  }
+  if (m.context) result.context = m.context
+  if (m.topic) result.topic = m.topic
+  return result
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0
@@ -133,7 +153,7 @@ function readBody(req) {
  * @param {object} deps.auth - authenticator
  * @param {object} [deps.storeV2] - transitional v2 message store (Phase 1)
  */
-export function createBrokerServer({ config, store, auth, storeV2 = createV2Store({ dataDir: config.dataDir, persist: config.persist }) }) {
+export function createBrokerServer({ config, store, auth, storeV2 = createV2Store({ dataDir: config.dataDir, persist: config.persist, leaseSeconds: config.leaseSeconds, maxAttempts: config.maxAttempts }) }) {
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
@@ -172,12 +192,261 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
         return
       }
 
-      const verdict = isV2Request(req) ? verifyV2Request(req, rawBody, config) : auth.check(req, rawBody)
+      const v2 = isV2Request(req)
+      const verdict = v2 ? verifyV2Request(req, rawBody, config) : auth.check(req, rawBody)
       if (!verdict.ok) {
         sendJson(res, verdict.status, errorBody(verdict.code, verdict.message))
         return
       }
       const agent = verdict.agent
+
+      // ---- v2 endpoints (docs/PROTOCOL-V2.md) --------------------------
+      if (v2) {
+        if (req.method === 'POST' && path === '/v1/messages') {
+          const parsed = parseJsonObject(rawBody)
+          if (!parsed) {
+            sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+            return
+          }
+          const origin = String(parsed.origin || '').trim().toLowerCase()
+          const target = String(parsed.target || '').trim().toLowerCase()
+          const kind = String(parsed.kind || '').trim().toLowerCase()
+          const body = String(parsed.body || '').trim()
+          const sessionRef = truncateCodePoints(parsed.session_ref, 300)
+          const idempotencyKey = String(parsed.idempotency_key || '').trim().slice(0, 120)
+          const parentId = parsed.parent_id ? String(parsed.parent_id).trim() : null
+          const executionMode = String(parsed.execution_mode || 'read').trim().toLowerCase()
+          if (origin !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'origin does not match authenticated agent'))
+            return
+          }
+          if (kind !== 'request' && kind !== 'reply') {
+            sendJson(res, 400, errorBody('bad_request', 'invalid message kind'))
+            return
+          }
+          if (!body || codePointLength(body) > V2_MAX_BODY || !idempotencyKey) {
+            sendJson(res, 400, errorBody('bad_request', 'message body or idempotency key is invalid'))
+            return
+          }
+          const now = Date.now() / 1000
+          const requestedTtl = Math.floor(Number(parsed.ttl_seconds) || 3600)
+          const ttl = Math.max(V2_TTL_MIN, Math.min(requestedTtl, V2_TTL_MAX))
+          const topic = truncateCodePoints(parsed.topic, 200)
+          let rootId = parsed.root_id ? String(parsed.root_id) : null
+          let sessionRefFinal = sessionRef
+          let executionModeFinal = executionMode
+          let topicFinal = topic
+          if (kind === 'request') {
+            if (!V2_MODES.includes(executionMode)) {
+              sendJson(res, 400, errorBody('bad_request', 'execution_mode must be read, continue, or write'))
+              return
+            }
+            if (executionMode === 'write') {
+              // Phase 2: workspace isolation / write lease not built yet — refuse.
+              sendJson(res, 403, errorBody('forbidden', 'write mode is not enabled yet'))
+              return
+            }
+            const allowed = config.agents?.[origin]?.allowedTargets
+            if (allowed && !allowed.includes(target)) {
+              sendJson(res, 403, errorBody('forbidden', `target is not allowed for ${executionMode} mode`))
+              return
+            }
+            rootId = rootId ?? cryptoRandomHex()
+          } else {
+            if (!parentId) {
+              sendJson(res, 400, errorBody('bad_request', 'reply requires parent_id'))
+              return
+            }
+            const parent = storeV2.get(parentId)
+            if (!parent) {
+              sendJson(res, 404, errorBody('no_such_message', 'parent relay message was not found'))
+              return
+            }
+            if (parent.target !== origin || parent.origin !== target) {
+              sendJson(res, 403, errorBody('forbidden', 'reply is not authorized for this message'))
+              return
+            }
+            rootId = parent.root_id
+            sessionRefFinal = parent.session_ref
+            executionModeFinal = parent.execution_mode
+            topicFinal = parent.topic
+          }
+          const message = new RelayMessage({
+            message_id: cryptoRandomHex(),
+            root_id: rootId,
+            parent_id: parentId,
+            origin,
+            target,
+            kind,
+            body,
+            session_ref: sessionRefFinal,
+            created_at: now,
+            expires_at: now + ttl,
+            execution_mode: executionModeFinal,
+            context: truncateCodePoints(parsed.context, V2_MAX_BODY),
+            topic: topicFinal,
+          })
+          const { message_id, created } = storeV2.create(message, idempotencyKey)
+          sendJson(res, 200, { message_id, created, protocol_version: V2_VERSION })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/pull') {
+          const parsed = parseJsonObject(rawBody)
+          if (!parsed) {
+            sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+            return
+          }
+          if (parsed.agent !== undefined && String(parsed.agent).trim().toLowerCase() !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'agent does not match authenticated identity'))
+            return
+          }
+          let limit = 8
+          if (parsed.limit !== undefined) {
+            limit = Math.max(1, Math.min(Math.floor(Number(parsed.limit)) || 1, 8))
+            if (!Number.isFinite(Number(parsed.limit))) {
+              sendJson(res, 400, errorBody('bad_request', 'limit must be an integer'))
+              return
+            }
+          }
+          let leaseSeconds
+          if (parsed.lease_seconds !== undefined) {
+            const raw = Number(parsed.lease_seconds)
+            if (!Number.isFinite(raw)) {
+              sendJson(res, 400, errorBody('bad_request', 'lease_seconds must be an integer'))
+              return
+            }
+            leaseSeconds = Math.max(15, Math.min(Math.floor(raw), 3600))
+          }
+          const messages = storeV2.pull(agent, Date.now() / 1000, { limit, leaseSeconds })
+          sendJson(res, 200, { messages: messages.map(v2PublicMessage) })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/ack') {
+          const parsed = parseJsonObject(rawBody)
+          if (!parsed) {
+            sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+            return
+          }
+          if (parsed.agent !== undefined && String(parsed.agent).trim().toLowerCase() !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'agent does not match authenticated identity'))
+            return
+          }
+          const messageId = String(parsed.message_id || '').trim()
+          const outcome = String(parsed.outcome || '').trim().toLowerCase()
+          const error = String(parsed.error || '').slice(0, 300)
+          if (!messageId) {
+            sendJson(res, 400, errorBody('bad_request', 'message_id is required'))
+            return
+          }
+          try {
+            storeV2.ack(messageId, agent, outcome, error, Date.now() / 1000)
+          } catch (err) {
+            const status = err.code === 'forbidden' ? 403 : 400
+            sendJson(res, status, errorBody(err.code ?? 'bad_request', err.message))
+            return
+          }
+          sendJson(res, 200, { ok: true })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/status') {
+          const parsed = parseJsonObject(rawBody)
+          if (!parsed || !Array.isArray(parsed.message_ids)) {
+            sendJson(res, 400, errorBody('bad_request', 'message_ids array is required'))
+            return
+          }
+          if (parsed.agent !== undefined && String(parsed.agent).trim().toLowerCase() !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'agent does not match authenticated identity'))
+            return
+          }
+          const ids = parsed.message_ids.map(String).filter(Boolean).slice(0, 100)
+          sendJson(res, 200, { messages: storeV2.statusFor(agent, ids) })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/recent') {
+          const parsed = parseJsonObject(rawBody)
+          if (!parsed) {
+            sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+            return
+          }
+          if (parsed.agent !== undefined && String(parsed.agent).trim().toLowerCase() !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'agent does not match authenticated identity'))
+            return
+          }
+          const limit = Number.isFinite(Number(parsed.limit)) ? Math.max(1, Math.min(Math.floor(Number(parsed.limit)) || 20, 50)) : 20
+          sendJson(res, 200, { messages: storeV2.recentFor(agent, Date.now() / 1000, limit) })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/messages/query') {
+          const parsed = parseJsonObject(rawBody)
+          if (!parsed) {
+            sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+            return
+          }
+          if (parsed.agent !== undefined && String(parsed.agent).trim().toLowerCase() !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'agent does not match authenticated identity'))
+            return
+          }
+          let since
+          if (parsed.since !== undefined) {
+            since = Number(parsed.since)
+            if (!Number.isFinite(since)) {
+              sendJson(res, 400, errorBody('bad_request', 'since must be a number'))
+              return
+            }
+          }
+          const messages = storeV2.queryMessages(agent, {
+            limit: parsed.limit,
+            message_id: parsed.message_id,
+            root_id: parsed.root_id,
+            origin: parsed.origin,
+            target: parsed.target,
+            kind: parsed.kind,
+            status: parsed.status,
+            topic: parsed.topic,
+            since,
+          })
+          sendJson(res, 200, { agent, messages })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/admin/requeue') {
+          const parsed = parseJsonObject(rawBody)
+          const messageId = String(parsed?.message_id || '').trim()
+          if (!messageId) {
+            sendJson(res, 400, errorBody('bad_request', 'message_id is required'))
+            return
+          }
+          if (!storeV2.requeue(messageId, Date.now() / 1000)) {
+            sendJson(res, 404, errorBody('no_such_message', 'message is not in a requeue-able state'))
+            return
+          }
+          sendJson(res, 200, { ok: true, message_id: messageId })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/admin/cancel') {
+          const parsed = parseJsonObject(rawBody)
+          const messageId = String(parsed?.message_id || '').trim()
+          if (!messageId) {
+            sendJson(res, 400, errorBody('bad_request', 'message_id is required'))
+            return
+          }
+          if (!storeV2.cancel(messageId, Date.now() / 1000)) {
+            sendJson(res, 404, errorBody('no_such_message', 'message is not in a cancellable state'))
+            return
+          }
+          sendJson(res, 200, { ok: true, message_id: messageId })
+          return
+        }
+
+        sendJson(res, 404, errorBody('not_found', `no v2 route ${req.method} ${path}`))
+        return
+      }
 
       if (req.method === 'POST' && path === '/register') {
         let parsed
@@ -352,97 +621,6 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           to: typeof parsed.to === 'string' ? parsed.to : undefined,
         })
         sendJson(res, 200, { messages, count: messages.length })
-        return
-      }
-
-      // ---- v2 message creation (docs/PROTOCOL-V2.md) ----
-
-      if (req.method === 'POST' && path === '/v1/messages') {
-        const parsed = parseJsonObject(rawBody)
-        if (!parsed) {
-          sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
-          return
-        }
-        const origin = String(parsed.origin || '').trim().toLowerCase()
-        const target = String(parsed.target || '').trim().toLowerCase()
-        const kind = String(parsed.kind || '').trim().toLowerCase()
-        const body = String(parsed.body || '').trim()
-        const sessionRef = truncateCodePoints(parsed.session_ref, 300)
-        const idempotencyKey = String(parsed.idempotency_key || '').trim().slice(0, 120)
-        const parentId = parsed.parent_id ? String(parsed.parent_id).trim() : null
-        const executionMode = String(parsed.execution_mode || 'read').trim().toLowerCase()
-        if (origin !== agent) {
-          sendJson(res, 403, errorBody('forbidden', 'origin does not match authenticated agent'))
-          return
-        }
-        if (kind !== 'request' && kind !== 'reply') {
-          sendJson(res, 400, errorBody('bad_request', 'invalid message kind'))
-          return
-        }
-        if (!body || codePointLength(body) > V2_MAX_BODY || !idempotencyKey) {
-          sendJson(res, 400, errorBody('bad_request', 'message body or idempotency key is invalid'))
-          return
-        }
-        const now = Date.now() / 1000
-        const requestedTtl = Math.floor(Number(parsed.ttl_seconds) || 3600)
-        const ttl = Math.max(V2_TTL_MIN, Math.min(requestedTtl, V2_TTL_MAX))
-        const topic = truncateCodePoints(parsed.topic, 200)
-        let rootId = parsed.root_id ? String(parsed.root_id) : null
-        let sessionRefFinal = sessionRef
-        let executionModeFinal = executionMode
-        let topicFinal = topic
-        if (kind === 'request') {
-          if (!V2_MODES.includes(executionMode)) {
-            sendJson(res, 400, errorBody('bad_request', 'execution_mode must be read, continue, or write'))
-            return
-          }
-          if (executionMode === 'write') {
-            // Phase 1: workspace isolation / write lease not built yet — refuse.
-            sendJson(res, 403, errorBody('forbidden', 'write mode is not enabled yet'))
-            return
-          }
-          const allowed = config.agents?.[origin]?.allowedTargets
-          if (allowed && !allowed.includes(target)) {
-            sendJson(res, 403, errorBody('forbidden', `target is not allowed for ${executionMode} mode`))
-            return
-          }
-          rootId = rootId ?? cryptoRandomHex()
-        } else {
-          if (!parentId) {
-            sendJson(res, 400, errorBody('bad_request', 'reply requires parent_id'))
-            return
-          }
-          const parent = storeV2.get(parentId)
-          if (!parent) {
-            sendJson(res, 404, errorBody('no_such_message', 'parent relay message was not found'))
-            return
-          }
-          if (parent.target !== origin || parent.origin !== target) {
-            sendJson(res, 403, errorBody('forbidden', 'reply is not authorized for this message'))
-            return
-          }
-          rootId = parent.root_id
-          sessionRefFinal = parent.session_ref
-          executionModeFinal = parent.execution_mode
-          topicFinal = parent.topic
-        }
-        const message = new RelayMessage({
-          message_id: cryptoRandomHex(),
-          root_id: rootId,
-          parent_id: parentId,
-          origin,
-          target,
-          kind,
-          body,
-          session_ref: sessionRefFinal,
-          created_at: now,
-          expires_at: now + ttl,
-          execution_mode: executionModeFinal,
-          context: truncateCodePoints(parsed.context, V2_MAX_BODY),
-          topic: topicFinal,
-        })
-        const { message_id, created } = storeV2.create(message, idempotencyKey)
-        sendJson(res, 200, { message_id, created, protocol_version: V2_VERSION })
         return
       }
 

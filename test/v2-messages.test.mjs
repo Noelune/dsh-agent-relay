@@ -147,13 +147,14 @@ test('a valid reply to an existing parent inherits root/session/mode/topic', asy
 
 test('store-v2 persists across restarts and preserves idempotency', () => {
   const dir = mkdtempSync(join(tmpdir(), 'relay-v2persist-'))
+  const now = Date.now() / 1000
   try {
     const first = createV2Store({ dataDir: dir, persist: true })
     const created = first.create(
       {
         message_id: 'a'.repeat(32), root_id: 'b'.repeat(32), parent_id: null,
         origin: 'alpha', target: 'beta', kind: 'request', body: 'persist me',
-        session_ref: 's', created_at: 1, expires_at: 2, execution_mode: 'read',
+        session_ref: 's', created_at: now, expires_at: now + 3600, execution_mode: 'read',
       },
       'alpha:key1',
     )
@@ -168,7 +169,7 @@ test('store-v2 persists across restarts and preserves idempotency', () => {
       {
         message_id: 'c'.repeat(32), root_id: 'd'.repeat(32), parent_id: null,
         origin: 'alpha', target: 'beta', kind: 'request', body: 'persist me',
-        session_ref: 's', created_at: 3, expires_at: 4, execution_mode: 'read',
+        session_ref: 's', created_at: now, expires_at: now + 3600, execution_mode: 'read',
       },
       'alpha:key1',
     )
