@@ -19,8 +19,10 @@
  * stream and emit the accumulated assistant text as the final reply.
  */
 import { spawn } from 'node:child_process'
+import { resolveCli } from './resolve-cli.mjs'
 
 const cmd = process.env.CLAUDE_CMD || (process.platform === 'win32' ? 'claude.cmd' : 'claude')
+const RESOLVED = resolveCli(cmd)
 
 function buildArgs(cwd) {
   const args = [
@@ -39,8 +41,7 @@ process.stdin.setEncoding('utf8')
 process.stdin.on('data', (chunk) => { input += chunk })
 process.stdin.on('end', () => {
   const cwd = process.env.RELAY_WORKSPACE || process.cwd()
-  // shell:true lets Node run `.cmd` shims on Windows (claude.cmd).
-  const child = spawn(cmd, buildArgs(cwd), { cwd, shell: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const child = spawn(RESOLVED.file, [...RESOLVED.args, ...buildArgs(cwd)], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
   let stderr = ''
   const textParts = []
   child.stdout.setEncoding('utf8').on('data', (chunk) => {

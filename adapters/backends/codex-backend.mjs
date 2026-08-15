@@ -18,8 +18,9 @@
  *                  write-mode requests into a git worktree)
  */
 import { spawn } from 'node:child_process'
+import { resolveCli } from './resolve-cli.mjs'
 
-const cmd = process.env.CODEX_CMD || (process.platform === 'win32' ? 'codex.cmd' : 'codex')
+const RESOLVED = resolveCli(process.env.CODEX_CMD || (process.platform === 'win32' ? 'codex.cmd' : 'codex'))
 
 // The codex `exec --json` output is a JSON object on stdout. Build the args to
 // match the reference codex CLI layout: approval/sandbox flags come BEFORE the
@@ -44,9 +45,7 @@ process.stdin.on('end', () => {
   const cwd = process.env.RELAY_WORKSPACE || process.cwd()
   const env = { ...process.env }
   if (process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME
-  // shell:true lets Node run `.cmd` shims on Windows (codex.cmd / claude.cmd).
-  // The args are fixed/controlled by this backend, not user input.
-  const child = spawn(cmd, buildArgs(cwd), { env, shell: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const child = spawn(RESOLVED.file, [...RESOLVED.args, ...buildArgs(cwd)], { env, stdio: ['pipe', 'pipe', 'pipe'] })
   let stdout = ''
   let stderr = ''
   child.stdout.setEncoding('utf8').on('data', (c) => { stdout += c })
