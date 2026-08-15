@@ -128,12 +128,12 @@ function v2PublicMessage(m) {
 
 /**
  * v2 per-mode ACL (self-use compatible). An agent without a config entry may
- * send to anyone (v1-compatible permissive default); with an entry, the mode's
- * whitelist applies — write defaults to closed (empty allowed_write_targets).
+ * send read/continue to anyone (v1-compatible permissive default) but **write
+ * is always closed unless explicitly granted** via allowed_write_targets.
  */
 function v2CanSend(config, from, to, mode) {
   const entry = config.agents?.[from]
-  if (!entry) return true
+  if (!entry) return mode !== 'write'
   let list
   if (mode === 'write') list = entry.allowedWriteTargets ?? []
   else if (mode === 'continue') list = entry.allowedContinueTargets ?? entry.allowedTargets

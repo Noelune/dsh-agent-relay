@@ -94,3 +94,13 @@ test('config: per-mode ACL — write closed by default, read/continue from allow
   assert.deepEqual(config.agents.delta.allowedContinueTargets, ['beta', 'gamma'])
   assert.deepEqual(config.agents.delta.allowedWriteTargets, ['beta'])
 })
+
+test('config: agent target lists are lowercased (v2 matches on lowercase names)', () => {
+  const config = normalizeConfig(baseConfig({
+    agents: {
+      alpha: { allowed_targets: ['Beta'], allowed_read_targets: ['Gamma', 'beta'] },
+    },
+  }))
+  assert.deepEqual(config.agents.alpha.allowedTargets, ['beta'])
+  assert.deepEqual(config.agents.alpha.allowedReadTargets, ['gamma', 'beta'])
+})

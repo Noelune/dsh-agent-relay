@@ -140,13 +140,17 @@ function normalizeAgents(loaded) {
     }
     const secret = cfg?.secret === undefined ? null : String(cfg.secret)
     if (secret !== null && !secret) throw new Error(`invalid agents.${name}.secret: must not be empty`)
-    const legacy = Array.isArray(targets) ? targets.map(String) : null
+    // Targets are normalized to lowercase — v2 lowercases agent names and
+    // targets on the wire, so config lists must match (self-use _string_list
+    // also lowercases).
+    const lowerList = (items) => (Array.isArray(items) ? items.map((item) => String(item).trim().toLowerCase()) : null)
+    const legacy = lowerList(targets)
     out[name] = {
       secret,
       allowedTargets: legacy,
-      allowedReadTargets: Array.isArray(read) ? read.map(String) : legacy,
-      allowedContinueTargets: Array.isArray(cont) ? cont.map(String) : legacy,
-      allowedWriteTargets: Array.isArray(write) ? write.map(String) : [],
+      allowedReadTargets: Array.isArray(read) ? lowerList(read) : legacy,
+      allowedContinueTargets: Array.isArray(cont) ? lowerList(cont) : legacy,
+      allowedWriteTargets: Array.isArray(write) ? lowerList(write) : [],
     }
   }
   const isolated = Object.values(out).some((agent) => agent.secret !== null)

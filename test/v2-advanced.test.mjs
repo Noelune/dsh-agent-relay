@@ -104,6 +104,19 @@ test('per-mode ACL: an agent without a config entry may send to anyone', async (
   assert.equal(res.status, 200)
 })
 
+test('per-mode ACL: write is closed for an agent without a config entry', async () => {
+  const res = await create('free', 'whoever', 'write', 'please edit', 'acl:free-write')
+  assert.equal(res.status, 403)
+})
+
+test('per-mode ACL: continue uses the continue whitelist', async () => {
+  // alpha allowed_continue_targets = ['beta']; 'gamma' is only in write targets.
+  const ok = await create('alpha', 'beta', 'continue', 'continue on it', 'acl:cont-ok')
+  assert.equal(ok.status, 200)
+  const denied = await create('alpha', 'gamma', 'continue', 'continue there', 'acl:cont-deny')
+  assert.equal(denied.status, 403)
+})
+
 test('notify_failed_to_sender: a failed request delivers an undelivered notice', async () => {
   const created = await create('reqr', 'worker', 'read', 'please verify X', 'notify:1')
   const messageId = (await created.json()).message_id
