@@ -20,9 +20,13 @@ function findPython() {
 test('Python relay client contract', () => {
   const python = findPython()
   assert.ok(python, 'Python 3.10+ is required to test the shipped Python adapter')
+  // Run the test file directly instead of `python -m unittest test/...`: the
+  // `test` package name collides with the Python standard library's `test`
+  // package on some interpreters (notably Linux), which shadows the local
+  // directory and breaks module-path resolution.
   const result = spawnSync(
     python.command,
-    [...python.prefix, '-m', 'unittest', 'test/test_relay_client.py', '-v'],
+    [...python.prefix, 'test/test_relay_client.py', '-v'],
     { cwd: repoRoot, encoding: 'utf8' },
   )
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
