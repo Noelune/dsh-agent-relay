@@ -191,7 +191,8 @@ capabilities that previously lived in the self-use Python broker (`relay/`)
 and the custom dsh plugin. To cut over without losing history:
 
 1. **Prepare the Node broker config** mirroring your self-use `agent_relay`
-   section — per-agent secrets and per-mode ACLs:
+   section — per-agent secrets and per-mode ACLs (note: the config loader is a
+   YAML subset — use nested mappings + inline arrays, not flow `{...}` maps):
 
    ```yaml
    broker:
@@ -203,12 +204,28 @@ and the custom dsh plugin. To cut over without losing history:
      leaseSeconds: 600
      maxAttempts: 3
      notifyFailedToSender: true
+
    agents:
-     codex:   { secret: <hex>, allowed_read_targets: [claude, hermes, openclaw, dsh], allowed_write_targets: [] }
-     claude:  { secret: <hex>, allowed_read_targets: [codex, hermes, openclaw, dsh], allowed_write_targets: [] }
-     hermes:  { secret: <hex>, allowed_read_targets: [codex, claude, openclaw, dsh], allowed_write_targets: [claude] }
-     openclaw:{ secret: <hex>, allowed_read_targets: [codex, claude, hermes, dsh], allowed_write_targets: [] }
-     dsh:     { secret: <hex>, allowed_read_targets: [codex, claude, hermes, openclaw], allowed_write_targets: [] }
+     codex:
+       secret: <hex>
+       allowed_read_targets: [claude, hermes, openclaw, dsh]
+       allowed_write_targets: []
+     claude:
+       secret: <hex>
+       allowed_read_targets: [codex, hermes, openclaw, dsh]
+       allowed_write_targets: []
+     hermes:
+       secret: <hex>
+       allowed_read_targets: [codex, claude, openclaw, dsh]
+       allowed_write_targets: [claude]
+     openclaw:
+       secret: <hex>
+       allowed_read_targets: [codex, claude, hermes, dsh]
+       allowed_write_targets: []
+     dsh:
+       secret: <hex>
+       allowed_read_targets: [codex, claude, hermes, openclaw]
+       allowed_write_targets: []
    ```
 
 2. **Migrate the message history** from the self-use database:
