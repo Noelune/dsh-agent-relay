@@ -60,7 +60,8 @@ function runBackend(cfg, prompt, cwd) {
   return new Promise((resolve, reject) => {
     const tokens = cfg.backendCmd.trim().split(/\s+/)
     const [prog, ...args] = tokens
-    const child = execFile(prog, args, { cwd, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const env = { ...process.env, RELAY_WORKSPACE: cwd }
+    const child = execFile(prog, args, { cwd, env, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) reject(new Error(String(stderr || err.message).slice(0, 500)))
       else resolve(String(stdout || '').trim())
     })
