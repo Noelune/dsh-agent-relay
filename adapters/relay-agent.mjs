@@ -86,17 +86,28 @@ async function processMessage(client, msg, cfg) {
       return
     }
   }
+  // Keep the broker delivery lease alive while the backend runs (v3 brokers):
+  // without renewal a turn longer than the lease window is re-queued and
+  // re-delivered while the original is still in flight.
+  const renewTimer = msg.lease_token
+    ? setInterval(() => {
+        client.renewLease(msg.message_id, msg.lease_token, 600)
+          .catch((e) => console.error(`[relay-agent] lease renewal ended for ${msg.message_id}: ${e.message}`))
+      }, 240_000)
+    : null
+  if (renewTimer) renewTimer.unref?.()
   try {
     const prompt = buildInboundPrompt(msg) + (plan.isolated ? `\n[isolated workspace: ${plan.workspace}]\n` : '')
     const output = await runBackend(cfg, prompt, plan.workspace)
     const replyText = output + relayWorkspaceNote(plan)
     await client.sendReply(msg, replyText, `reply:${msg.message_id}`)
-    await client.ack(msg.message_id, 'completed')
+    await client.ack(msg.message_id, 'completed', undefined, msg.lease_token)
     console.error(`[relay-agent] ${msg.message_id} completed (${plan.isolated ? 'worktree' : plan.requiresWriteLease ? 'lease' : 'in-place'})`)
   } catch (e) {
     console.error(`[relay-agent] ${msg.message_id} failed: ${e.message}`)
-    try { await client.ack(msg.message_id, 'retry', String(e?.message || 'error').slice(0, 300)) } catch { /* best-effort */ }
+    try { await client.ack(msg.message_id, 'retry', String(e?.message || 'error').slice(0, 300), msg.lease_token) } catch { /* best-effort */ }
   } finally {
+    if (renewTimer) clearInterval(renewTimer)
     if (lease) lease.release()
   }
 }
