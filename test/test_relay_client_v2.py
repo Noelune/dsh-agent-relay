@@ -23,7 +23,7 @@ def main() -> int:
     beta = RelayClientV2(endpoint, "beta", secret)
 
     health = alpha.health()
-    assert health.get("protocol_version") == 2, f"unexpected protocol_version: {health}"
+    assert health.get("protocol_version") == 3, f"unexpected protocol_version: {health}"
 
     message_id = alpha.send_request(
         target="beta", body="cross-language review request", session_ref="alpha",

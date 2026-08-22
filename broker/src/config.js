@@ -84,7 +84,8 @@ export function normalizeConfig(loaded) {
     leaseSeconds: Number(b.leaseSeconds ?? 600),
     maxAttempts: Number(b.maxAttempts ?? 3),
     notifyFailedToSender: booleanConfig(b.notifyFailedToSender, true, 'broker.notifyFailedToSender'),
-    agents: normalizeAgents(loaded.agents),
+    adminAgents: new Set(s.admin_agents === undefined ? [] : (Array.isArray(s.admin_agents) ? s.admin_agents : []).map((item) => String(item).trim().toLowerCase()).filter(Boolean)),
+    agents: normalizeAgents(loaded.agents, secret),
   }
   if (b.tls !== undefined) {
     throw new Error('broker.tls is not supported — terminate TLS at a trusted reverse proxy')
@@ -114,17 +115,14 @@ function validateInteger(value, minimum, name, maximum = Number.MAX_SAFE_INTEGER
 }
 
 /**
- * Per-agent routing ACL. An agent with `allowed_targets` may only send to
- * those targets; an agent WITHOUT an entry (or with `allowed_targets: null`)
- * may send to anyone (v1.0 default, backward compatible).
- *
- * v2 per-mode ACL (self-use compatible):
- *   allowed_read_targets      — read  mode whitelist (defaults to allowed_targets)
- *   allowed_continue_targets  — continue mode whitelist (defaults to allowed_targets)
- *   allowed_write_targets     — write mode whitelist (default EMPTY = write closed)
+ * Per-agent signing keys (v3 protocol). Each agent has a keyring:
+ * `{ keyId: { secret, notAfter } }`. The default ring maps the id `legacy` to
+ * the agent's single secret (or the shared broker secret), which is exactly
+ * what v2 clients sign with — so one config serves both protocol generations.
  */
-function normalizeAgents(loaded) {
+function normalizeAgents(loaded, sharedSecret) {
   const out = {}
+  const ownAuth = new Map() // name -> carries its own signing credential
   for (const [name, cfg] of Object.entries(loaded ?? {})) {
     const targets = cfg?.allowed_targets
     if (targets !== undefined && targets !== null && !Array.isArray(targets)) {
@@ -140,6 +138,27 @@ function normalizeAgents(loaded) {
     }
     const secret = cfg?.secret === undefined ? null : String(cfg.secret)
     if (secret !== null && !secret) throw new Error(`invalid agents.${name}.secret: must not be empty`)
+    let keys = null
+    let hasOwnKeys = false
+    if (cfg?.keys !== undefined && cfg?.keys !== null) {
+      hasOwnKeys = true
+      if (typeof cfg.keys !== 'object' || Array.isArray(cfg.keys)) {
+        throw new Error(`invalid agents.${name}.keys: expected a mapping of key id to {secret, not_after?}`)
+      }
+      keys = {}
+      for (const [keyId, keyCfg] of Object.entries(cfg.keys)) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(keyId)) throw new Error(`invalid agents.${name}.keys.${keyId}.key_id`)
+        const keySecret = String(keyCfg?.secret ?? '')
+        if (!keySecret) throw new Error(`invalid agents.${name}.keys.${keyId}.secret: must not be empty`)
+        let notAfter = null
+        if (keyCfg?.not_after !== undefined && keyCfg?.not_after !== null) {
+          notAfter = Number(keyCfg.not_after)
+          if (!Number.isFinite(notAfter) || notAfter <= 0) throw new Error(`invalid agents.${name}.keys.${keyId}.not_after: must be a unix timestamp`)
+        }
+        keys[keyId] = { secret: keySecret, notAfter }
+      }
+      if (!Object.keys(keys).length) throw new Error(`invalid agents.${name}.keys: must not be empty`)
+    }
     // Targets are normalized to lowercase — v2 lowercases agent names and
     // targets on the wire, so config lists must match (self-use _string_list
     // also lowercases).
@@ -147,14 +166,16 @@ function normalizeAgents(loaded) {
     const legacy = lowerList(targets)
     out[name] = {
       secret,
+      keys: keys ?? { legacy: { secret: secret ?? sharedSecret, notAfter: null } },
       allowedTargets: legacy,
       allowedReadTargets: Array.isArray(read) ? lowerList(read) : legacy,
       allowedContinueTargets: Array.isArray(cont) ? lowerList(cont) : legacy,
       allowedWriteTargets: Array.isArray(write) ? lowerList(write) : [],
     }
+    ownAuth.set(name, secret !== null || hasOwnKeys)
   }
-  const isolated = Object.values(out).some((agent) => agent.secret !== null)
-  if (isolated && Object.entries(out).some(([, agent]) => agent.secret === null)) {
+  const isolated = [...ownAuth.values()].some(Boolean)
+  if (isolated && [...ownAuth.values()].some((has) => !has)) {
     throw new Error('invalid agents: per-agent authentication requires a secret for every configured agent')
   }
   return out

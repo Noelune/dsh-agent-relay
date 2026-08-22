@@ -50,7 +50,7 @@ test('GET /healthz is public and reports v2 protocol metadata', async () => {
   assert.equal(res.status, 200)
   const body = await res.json()
   assert.equal(body.ok, true)
-  assert.equal(body.protocol_version, 2)
+  assert.equal(body.protocol_version, 3)
   assert.equal(body.broker, 'dsh-agent-relay')
   assert.ok(Array.isArray(body.agents))
   // The self-use peers tool reads queues + last_pull_at — they must be present.

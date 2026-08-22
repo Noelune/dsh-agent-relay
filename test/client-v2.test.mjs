@@ -38,11 +38,11 @@ after(async () => {
 
 const base = () => ({ endpoint: `http://127.0.0.1:${port}`, secret: SHARED })
 
-test('RelayClientV2: health reports protocol_version 2', async () => {
+test('RelayClientV2: health reports the protocol version', async () => {
   const alpha = new RelayClientV2({ ...base(), agent: 'alpha' })
   const health = await alpha.health()
   assert.equal(health.ok, true)
-  assert.equal(health.protocol_version, 2)
+  assert.equal(health.protocol_version, 3)
   assert.ok(Array.isArray(health.agents))
 })
 

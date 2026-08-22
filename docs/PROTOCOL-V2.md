@@ -82,6 +82,41 @@ Verify with a **constant-time comparison**. Reject with `401` on:
 - signature mismatch,
 - unknown agent (when per-agent secrets are configured).
 
+### 3.1 v3 scheme (key rotation, self-use compatible)
+
+A request may additionally carry `X-Agent-Relay-Key-Id`. When present, the
+broker authenticates with the **v3** scheme instead:
+
+| Header | Value |
+|---|---|
+| `X-Agent-Relay-Key-Id` | key id from the agent's keyring (e.g. `legacy`) |
+
+Signing string (one extra field — the key id — inserted second):
+
+```
+HMAC-SHA256( secret, agent + "\n" + keyId + "\n" + timestampSeconds + "\n" + METHOD + "\n" + pathname + "\n" + sha256hex(body) )
+```
+
+Each agent's keyring maps key ids to `{ secret, not_after? }` (broker config
+`agents.<name>.keys`; the implicit `legacy` key is the agent's single secret).
+A key past its `not_after` unix timestamp is rejected with
+`401 unknown_key` — rotate by publishing the new key id, switching clients
+over, then expiring the old one. Both schemes are accepted side by side
+(`/healthz` reports `signature_schemes: ["v2", "v3"]` and
+`protocol_version: 3`), so existing v2 clients keep working while clients
+migrate.
+
+**v3 delivery credentials.** A v3 `pull` response additionally includes
+`lease_token` and `lease_until` per message. While the lease is active the
+token is required and single-use:
+
+- `POST /v1/ack` with `lease_token` — the broker guards the state transition
+  on `status='leased' AND lease_token matches AND lease_until >= now`
+  (`409 lease_mismatch` otherwise). Acks without a token follow the v2 rules.
+- `POST /v1/lease/renew` — `{ agent?, message_id, lease_token, lease_seconds? }`
+  extends an active lease for long-running turns and returns
+  `{ ok: true, lease_until }` (`409` when the lease is gone).
+
 ## 4. Canonical body (byte-for-byte)
 
 ```text
@@ -125,13 +160,18 @@ With `agent=test-agent`, `secret=s3cret`, `method=POST`, `path=/v1/messages`,
 ```json
 {
   "ok": true,
-  "protocol_version": 2,
+  "protocol_version": 3,
   "broker": "dsh-agent-relay",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "storage": "sqlite",
+  "signature_schemes": ["v2", "v3"],
   "agents": ["codex", "dsh", "hermes"]
 }
 ```
+
+`protocol_version` 3 reports the bilingual broker (v2 signatures accepted
+alongside v3, see §3.1). `queues` additionally includes `oldest_queued_at`
+per agent.
 
 ### `POST /v1/messages` — create a message (auth)
 

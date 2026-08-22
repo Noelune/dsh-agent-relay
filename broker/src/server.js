@@ -75,38 +75,66 @@ function isV2Request(req) {
   return req.headers[V2_HEADERS.agent] !== undefined
 }
 
+/** An agent's keyring: explicit `keys`, its single secret, or the shared one. */
+function keyRingFor(config, entry) {
+  if (entry?.keys) return entry.keys
+  if (entry?.secret) return { legacy: { secret: entry.secret, notAfter: null } }
+  return null
+}
+
+/** True when any configured agent signs with its own credential (isolated auth). */
+function isolatedAuth(config) {
+  return Object.values(config.agents ?? {}).some((entry) => {
+    if (!entry) return false
+    if (entry.secret) return true
+    if (!entry.keys) return false
+    return Object.entries(entry.keys).some(([id, key]) => id !== 'legacy' || key?.secret !== config.secret)
+  })
+}
+
 /**
- * Authenticate a v2 request (X-Agent-Relay-* headers, v2 signature scheme).
- * Mirrors the self-use broker's `_authenticated_payload`: when any configured
- * agent has a per-agent secret (isolated mode), the agent must be configured
- * and sign with its own secret; otherwise every agent name signs with the
- * shared secret (v1-compatible).
+ * Authenticate a v2/v3 request (X-Agent-Relay-* headers).
+ *
+ * Bilingual by design: a request carrying X-Agent-Relay-Key-Id uses the v3
+ * signature scheme (agent\nkeyId\nts\nMETHOD\npath\ndigest, verified against
+ * the agent's keyring entry, honoring not_after expiry); a request without it
+ * uses the v2 scheme (agent\nts\nMETHOD\npath\ndigest) signed with the agent's
+ * legacy secret. Mirrors the self-use broker's `_authenticated_payload` for v3
+ * clients while keeping every existing v2 client working. In isolated mode an
+ * unconfigured agent name is rejected (self-use parity).
  */
 function verifyV2Request(req, rawBody, config) {
   const agent = String(req.headers[V2_HEADERS.agent] || '').trim().toLowerCase()
   const timestamp = req.headers[V2_HEADERS.timestamp] || ''
   const signature = req.headers[V2_HEADERS.signature] || ''
+  const keyId = String(req.headers[V2_HEADERS.keyId] || '').trim()
   if (!agent || !timestamp || !signature) {
-    return { ok: false, status: 401, code: 'unauthenticated', message: 'missing v2 authentication headers' }
+    return { ok: false, status: 401, code: 'unauthenticated', message: 'missing authentication headers' }
   }
   const entry = config.agents?.[agent]
-  const isolated = Object.values(config.agents ?? {}).some((agentCfg) => agentCfg?.secret)
-  const secret = isolated ? (entry?.secret ?? null) : config.secret
-  if (!secret) {
+  if (!entry && isolatedAuth(config)) {
     return { ok: false, status: 401, code: 'unknown_agent', message: 'agent is not configured' }
+  }
+  const ring = keyRingFor(config, entry) ?? { legacy: { secret: config.secret, notAfter: null } }
+  const keyCfg = keyId ? ring[keyId] : ring.legacy
+  if (!keyCfg || !keyCfg.secret) {
+    return { ok: false, status: 401, code: keyId ? 'unknown_key' : 'unknown_agent', message: keyId ? 'unknown relay key id' : 'agent is not configured' }
+  }
+  if (keyCfg.notAfter != null && Date.now() / 1000 > keyCfg.notAfter) {
+    return { ok: false, status: 401, code: 'unknown_key', message: 'expired relay key' }
   }
   const ts = Number(timestamp)
   if (!Number.isFinite(ts) || Math.abs(Math.floor(Date.now() / 1000) - ts) > V2_SKEW) {
     return { ok: false, status: 401, code: 'unauthenticated', message: 'timestamp skew' }
   }
   const body = Buffer.from(rawBody || '', 'utf8')
-  if (!verifyV2Signature(agent, secret, req.method ?? 'GET', req.url ?? '/', timestamp, body, signature)) {
+  if (!verifyV2Signature(agent, keyCfg.secret, req.method ?? 'GET', req.url ?? '/', timestamp, body, signature, keyId)) {
     return { ok: false, status: 401, code: 'unauthenticated', message: 'invalid signature' }
   }
   return { ok: true, agent }
 }
 
-/** Public v2 message view (excludes broker-managed status/attempt fields). */
+/** Public v2/v3 message view (lease credentials are included for the puller). */
 function v2PublicMessage(m) {
   const result = {
     message_id: m.message_id,
@@ -123,6 +151,9 @@ function v2PublicMessage(m) {
   }
   if (m.context) result.context = m.context
   if (m.topic) result.topic = m.topic
+  if (m.lease_token) result.lease_token = m.lease_token
+  if (m.lease_until != null) result.lease_until = m.lease_until
+  if (m.allow_shared_write) result.allow_shared_write = true
   return result
 }
 
@@ -241,6 +272,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           broker: BROKER_NAME,
           version: BROKER_VERSION,
           storage: store.storage,
+          signature_schemes: ['v2', 'v3'],
           agents,
           queues: storeV2.queueStats(agents),
           last_pull_at: storeV2.lastPullAt,
@@ -276,6 +308,14 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           const idempotencyKey = String(parsed.idempotency_key || '').trim().slice(0, 120)
           const parentId = parsed.parent_id ? String(parsed.parent_id).trim() : null
           const executionMode = String(parsed.execution_mode || 'read').trim().toLowerCase()
+          let allowSharedWrite = false
+          if (parsed.allow_shared_write !== undefined) {
+            if (typeof parsed.allow_shared_write !== 'boolean') {
+              sendJson(res, 400, errorBody('bad_request', 'allow_shared_write must be a boolean'))
+              return
+            }
+            allowSharedWrite = parsed.allow_shared_write
+          }
           if (origin !== agent) {
             sendJson(res, 403, errorBody('forbidden', 'origin does not match authenticated agent'))
             return
@@ -324,6 +364,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
             sessionRefFinal = parent.session_ref
             executionModeFinal = parent.execution_mode
             topicFinal = parent.topic
+            allowSharedWrite = false // replies never carry write privileges
           }
           const message = new RelayMessage({
             message_id: cryptoRandomHex(),
@@ -339,6 +380,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
             execution_mode: executionModeFinal,
             context: truncateCodePoints(parsed.context, V2_MAX_BODY),
             topic: topicFinal,
+            allow_shared_write: kind === 'request' ? allowSharedWrite : false,
           })
           const { message_id, created } = storeV2.create(message, idempotencyKey)
           sendJson(res, 200, { message_id, created, protocol_version: V2_VERSION })
@@ -392,19 +434,45 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           const messageId = String(parsed.message_id || '').trim()
           const outcome = String(parsed.outcome || '').trim().toLowerCase()
           const error = String(parsed.error || '').slice(0, 300)
+          const leaseToken = String(parsed.lease_token || '').trim()
           if (!messageId) {
             sendJson(res, 400, errorBody('bad_request', 'message_id is required'))
             return
           }
           try {
-            storeV2.ack(messageId, agent, outcome, error, Date.now() / 1000)
+            storeV2.ack(messageId, agent, outcome, error, Date.now() / 1000, leaseToken)
           } catch (err) {
-            const status = err.code === 'forbidden' ? 403 : 400
+            const status = err.code === 'forbidden' ? 403 : err.code === 'lease_mismatch' ? 409 : 400
             sendJson(res, status, errorBody(err.code ?? 'bad_request', err.message))
             return
           }
-          notifyFailedSenders() // a retry may have just exhausted the attempts
+          if (outcome === 'retry') notifyFailedSenders() // a retry may have just exhausted the attempts
           sendJson(res, 200, { ok: true })
+          return
+        }
+
+        if (req.method === 'POST' && path === '/v1/lease/renew') {
+          const parsed = parseJsonObject(rawBody)
+          if (!parsed) {
+            sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
+            return
+          }
+          if (parsed.agent !== undefined && String(parsed.agent).trim().toLowerCase() !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'agent does not match authenticated identity'))
+            return
+          }
+          const messageId = String(parsed.message_id || '').trim()
+          const leaseToken = String(parsed.lease_token || '').trim()
+          if (!messageId || !leaseToken) {
+            sendJson(res, 400, errorBody('bad_request', 'message_id and lease_token are required'))
+            return
+          }
+          try {
+            const leaseUntil = storeV2.renewLease(messageId, agent, leaseToken, Date.now() / 1000, parsed.lease_seconds)
+            sendJson(res, 200, { ok: true, lease_until: leaseUntil })
+          } catch (err) {
+            sendJson(res, err.code === 'lease_mismatch' ? 409 : 400, errorBody(err.code ?? 'bad_request', err.message))
+          }
           return
         }
 
@@ -487,6 +555,9 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           return
         }
 
+        // Admin helpers mirror the self-use broker's authorization: operators
+        // listed in `security.admin_agents` may act on anything, everyone else
+        // only on their own side of an unfinished request.
         if (req.method === 'POST' && path === '/v1/admin/requeue') {
           const parsed = parseJsonObject(rawBody)
           const messageId = String(parsed?.message_id || '').trim()
@@ -496,17 +567,19 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           }
           const existing = storeV2.get(messageId)
           if (!existing) {
-            sendJson(res, 404, errorBody('no_such_message', 'message is not in a requeue-able state'))
+            sendJson(res, 404, errorBody('no_such_message', 'message was not found'))
             return
           }
-          if (existing.origin !== agent && existing.target !== agent) {
-            sendJson(res, 403, errorBody('forbidden', 'only the originator or the recipient may requeue this message'))
+          const isAdmin = config.adminAgents?.has(agent) === true
+          if (!isAdmin && (existing.target !== agent || existing.kind !== 'request' || existing.status === 'completed')) {
+            sendJson(res, 403, errorBody('forbidden', 'only the receiving agent may requeue an unfinished request'))
             return
           }
           if (!storeV2.requeue(messageId, Date.now() / 1000)) {
             sendJson(res, 404, errorBody('no_such_message', 'message is not in a requeue-able state'))
             return
           }
+          console.warn(`[relay-broker] admin requeue ${messageId} by ${agent}`) // ids only, never content
           sendJson(res, 200, { ok: true, message_id: messageId })
           return
         }
@@ -520,17 +593,19 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           }
           const existing = storeV2.get(messageId)
           if (!existing) {
-            sendJson(res, 404, errorBody('no_such_message', 'message is not in a cancellable state'))
+            sendJson(res, 404, errorBody('no_such_message', 'message was not found'))
             return
           }
-          if (existing.origin !== agent && existing.target !== agent) {
-            sendJson(res, 403, errorBody('forbidden', 'only the originator or the recipient may cancel this message'))
+          const isAdmin = config.adminAgents?.has(agent) === true
+          if (!isAdmin && (existing.origin !== agent || existing.kind !== 'request')) {
+            sendJson(res, 403, errorBody('forbidden', 'only the requesting agent may cancel its request'))
             return
           }
           if (!storeV2.cancel(messageId, Date.now() / 1000)) {
             sendJson(res, 404, errorBody('no_such_message', 'message is not in a cancellable state'))
             return
           }
+          console.warn(`[relay-broker] admin cancel ${messageId} by ${agent}`) // ids only, never content
           sendJson(res, 200, { ok: true, message_id: messageId })
           return
         }

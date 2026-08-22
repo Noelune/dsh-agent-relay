@@ -131,7 +131,7 @@ test('recent lists messages the agent was involved in; query filters by kind', a
 
 test('cancel marks a queued message completed and stops delivery', async () => {
   const messageId = await createRequest('alpha', 'beta', 'cancel me', 'life:cancel')
-  const cancelRes = await v2Fetch('beta', 'POST', '/v1/admin/cancel', { agent: 'beta', message_id: messageId })
+  const cancelRes = await v2Fetch('alpha', 'POST', '/v1/admin/cancel', { agent: 'alpha', message_id: messageId })
   assert.equal(cancelRes.status, 200)
   assert.equal(v2Store.get(messageId).status, 'completed')
   const after = await pull('beta')

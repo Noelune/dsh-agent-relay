@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added — v3 protocol compatibility (bilingual broker)
+
+The broker now speaks the self-use Python relay's v3 protocol alongside v2,
+closing the divergence that left v3 clients (the Hermes adapter and the Python
+relay agents) locked out of a v2-only broker:
+
+- **Bilingual signatures**: `X-Agent-Relay-Key-Id` present → v3 scheme
+  (`agent\nkeyId\nts\nMETHOD\npath\ndigest`); absent → v2 scheme. Per-agent
+  keyrings (`agents.<name>.keys`, with `not_after` expiry) support key
+  rotation; the implicit `legacy` key is the agent's single secret. Unknown or
+  expired key ids are rejected with `401 unknown_key`. `/healthz` reports
+  `protocol_version: 3` and `signature_schemes: ["v2", "v3"]`.
+- **Lease credentials (v3)**: `pull` responses include `lease_token` /
+  `lease_until`; `POST /v1/ack` with a token is guarded on the active lease
+  (`409 lease_mismatch` on mismatch/replay); new `POST /v1/lease/renew`
+  extends an active lease. Acks without a token keep v2 semantics.
+- **`allow_shared_write`** round-trips on requests (and is stripped from
+  replies), matching the self-use workspace-leasing semantics.
+- **Admin authz mirrors the self-use broker**: `security.admin_agents` may act
+  on anything; everyone else only on their own side (recipient requeues an
+  unfinished request, originator cancels their request). Admin operations are
+  audit-logged (ids only). `queues` in `/healthz` gains `oldest_queued_at`.
+- **SQLite schema migration**: pre-v3 databases gain the `lease_token` /
+  `allow_shared_write` columns in place on startup.
+
 ### Fixed — broker correctness and resource use
 
 - **v2 store `dataDir` resolves against the broker directory** — a relative

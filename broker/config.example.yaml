@@ -19,14 +19,25 @@ broker:
 security:
   lockAfterFailures: 5     # consecutive auth failures before locking
   lockMinutes: 5           # lock duration
+  # admin_agents: [ops]    # may requeue/cancel ANY message (others only their
+                          # own side: recipient requeues, originator cancels)
 
 # Optional v2 per-mode routing ACL. An agent with an entry may only send to
 # the targets in its mode's whitelist; write is opt-in (empty = closed).
 # Agents without an entry may send to anyone (v1-compatible default).
+# v3 clients (X-Agent-Relay-Key-Id header) verify against a keyring; the
+# implicit `legacy` key is the agent's single secret, so one config serves
+# both protocol generations.
 # agents:
 #   alpha:
 #     secret: <hex>                # per-agent secret (enables isolated auth)
 #     allowed_read_targets: [beta]
 #     allowed_continue_targets: [beta]
 #     allowed_write_targets: []    # write closed unless granted
+#     keys:                        # optional v3 keyring (key rotation)
+#       legacy:
+#         secret: <hex>            # same as `secret` above
+#       rotated-2027:
+#         secret: <hex>
+#         not_after: 1798761600    # unix ts; key rejected afterwards
 

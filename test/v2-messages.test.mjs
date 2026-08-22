@@ -62,7 +62,7 @@ test('creates a v2 request and returns a message_id', async () => {
   const data = await res.json()
   assert.equal(data.created, true)
   assert.match(data.message_id, /^[0-9a-f]{32}$/)
-  assert.equal(data.protocol_version, 2)
+  assert.equal(data.protocol_version, 3)
   assert.ok(v2Store.get(data.message_id))
 })
 

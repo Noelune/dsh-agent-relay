@@ -66,6 +66,7 @@ test('config: accepts optional per-agent secrets alongside routing ACLs', () => 
   }))
   assert.deepEqual(config.agents.alpha, {
     secret: 'alpha-secret',
+    keys: { legacy: { secret: 'alpha-secret', notAfter: null } },
     allowedTargets: ['beta'],
     allowedReadTargets: ['beta'],
     allowedContinueTargets: ['beta'],
@@ -73,6 +74,7 @@ test('config: accepts optional per-agent secrets alongside routing ACLs', () => 
   })
   assert.deepEqual(config.agents.beta, {
     secret: 'beta-secret',
+    keys: { legacy: { secret: 'beta-secret', notAfter: null } },
     allowedTargets: null,
     allowedReadTargets: null,
     allowedContinueTargets: null,

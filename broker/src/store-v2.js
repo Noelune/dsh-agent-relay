@@ -10,6 +10,7 @@
  * JSONL (relay-v2.jsonl). Both preserve the same records across restarts.
  */
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 
@@ -78,14 +79,23 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     }
   }
 
+  // Migrate pre-v3 databases in place: the lease_token / allow_shared_write
+  // columns were added by the v3 protocol. Guarded by PRAGMA table_info so it
+  // is a no-op on current schemas (and adds them to fresh ones after CREATE).
+  if (db) {
+    const columns = new Set(db.prepare('PRAGMA table_info(relay_v2_messages)').all().map((row) => String(row.name)))
+    if (!columns.has('allow_shared_write')) db.prepare('ALTER TABLE relay_v2_messages ADD COLUMN allow_shared_write INTEGER NOT NULL DEFAULT 0').run()
+    if (!columns.has('lease_token')) db.prepare('ALTER TABLE relay_v2_messages ADD COLUMN lease_token TEXT').run()
+  }
+
   // Lifecycle transitions update single rows via bound parameters; only the
   // JSONL fallback rewrites the whole file (a full-table rewrite per ack
   // caused heavy WAL growth).
   const insertStmt = db
-    ? db.prepare('INSERT OR REPLACE INTO relay_v2_messages(message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, context, topic, idempotency_key, status, attempts, lease_until, last_error, created_at, expires_at, completed_at, notified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    ? db.prepare('INSERT OR REPLACE INTO relay_v2_messages(message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, allow_shared_write, context, topic, idempotency_key, status, attempts, lease_until, lease_token, last_error, created_at, expires_at, completed_at, notified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
     : null
   const updateStmt = db
-    ? db.prepare('UPDATE relay_v2_messages SET status=?, attempts=?, lease_until=?, last_error=?, completed_at=?, notified_at=? WHERE message_id=?')
+    ? db.prepare('UPDATE relay_v2_messages SET status=?, attempts=?, lease_until=?, lease_token=?, last_error=?, completed_at=?, notified_at=? WHERE message_id=?')
     : null
   const deleteStmt = db
     ? db.prepare('DELETE FROM relay_v2_messages WHERE message_id=?')
@@ -111,8 +121,8 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
         for (const m of messages.values()) {
           insertStmt.run(
             m.message_id, m.root_id, m.parent_id, m.origin, m.target, m.kind, m.body,
-            m.session_ref, m.execution_mode, m.context, m.topic, m.idempotency_key,
-            m.status, m.attempts, m.lease_until, m.last_error ?? null,
+            m.session_ref, m.execution_mode, m.allow_shared_write ? 1 : 0, m.context, m.topic, m.idempotency_key,
+            m.status, m.attempts, m.lease_until, m.lease_token ?? null, m.last_error ?? null,
             m.created_at, m.expires_at, m.completed_at ?? null, m.notified_at ?? null,
           )
         }
@@ -133,8 +143,8 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     if (db) {
       insertStmt.run(
         m.message_id, m.root_id, m.parent_id, m.origin, m.target, m.kind, m.body,
-        m.session_ref, m.execution_mode, m.context, m.topic, m.idempotency_key,
-        m.status, m.attempts, m.lease_until, m.last_error ?? null,
+        m.session_ref, m.execution_mode, m.allow_shared_write ? 1 : 0, m.context, m.topic, m.idempotency_key,
+        m.status, m.attempts, m.lease_until, m.lease_token ?? null, m.last_error ?? null,
         m.created_at, m.expires_at, m.completed_at ?? null, m.notified_at ?? null,
       )
       return
@@ -146,7 +156,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   function persistUpdate(m) {
     if (!persist) return
     if (updateStmt) {
-      updateStmt.run(m.status, m.attempts, m.lease_until, m.last_error ?? null, m.completed_at ?? null, m.notified_at ?? null, m.message_id)
+      updateStmt.run(m.status, m.attempts, m.lease_until, m.lease_token ?? null, m.last_error ?? null, m.completed_at ?? null, m.notified_at ?? null, m.message_id)
       return
     }
     persistAll() // JSONL fallback has no row addressing — rewrite
@@ -165,15 +175,16 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   function load() {
     if (!persist) return
     if (db) {
-      const rows = db.prepare('SELECT message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, context, topic, idempotency_key, status, attempts, lease_until, last_error, created_at, expires_at, completed_at, notified_at FROM relay_v2_messages').all()
+      const rows = db.prepare('SELECT message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, allow_shared_write, context, topic, idempotency_key, status, attempts, lease_until, lease_token, last_error, created_at, expires_at, completed_at, notified_at FROM relay_v2_messages').all()
       for (const row of rows) {
         const m = {
           message_id: row.message_id, root_id: row.root_id, parent_id: row.parent_id,
           origin: row.origin, target: row.target, kind: row.kind, body: row.body,
           session_ref: row.session_ref ?? '', execution_mode: row.execution_mode,
+          allow_shared_write: Boolean(row.allow_shared_write),
           context: row.context ?? '', topic: row.topic ?? '',
           idempotency_key: row.idempotency_key, status: row.status, attempts: row.attempts,
-          lease_until: row.lease_until, last_error: row.last_error, created_at: row.created_at,
+          lease_until: row.lease_until, lease_token: row.lease_token ?? null, last_error: row.last_error, created_at: row.created_at,
           expires_at: row.expires_at, completed_at: row.completed_at, notified_at: row.notified_at,
         }
         messages.set(m.message_id, m)
@@ -202,6 +213,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       } else if (m.status === STATUS.LEASED && m.lease_until != null && m.lease_until < now) {
         m.status = STATUS.QUEUED
         m.lease_until = null
+        m.lease_token = null
         persistUpdate(m)
       } else if ((m.status === STATUS.QUEUED || m.status === STATUS.LEASED) && m.attempts >= maxAttemptsValue) {
         m.status = STATUS.FAILED
@@ -236,6 +248,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       body: String(message.body ?? ''),
       session_ref: String(message.session_ref ?? ''),
       execution_mode: String(message.execution_mode || 'read').toLowerCase(),
+      allow_shared_write: Boolean(message.allow_shared_write),
       context: String(message.context ?? ''),
       topic: String(message.topic ?? ''),
       idempotency_key: String(idempotencyKey),
@@ -244,6 +257,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       status: STATUS.QUEUED,
       attempts: 0,
       lease_until: null,
+      lease_token: null,
       last_error: null,
       completed_at: null,
       notified_at: null,
@@ -272,6 +286,10 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     for (const m of ready) {
       m.status = STATUS.LEASED
       m.lease_until = leaseUntil
+      // One delivery credential per pull (v3): acks and renewals must present
+      // this token while the lease is active, so a stale or duplicate ack can
+      // never mutate the message.
+      m.lease_token = randomBytes(32).toString('base64url')
       m.attempts += 1
       out.push(m)
       persistUpdate(m)
@@ -279,16 +297,24 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     return out
   }
 
-  function ack(messageId, target, outcome, error, now) {
+  function ack(messageId, target, outcome, error, now, leaseToken = '') {
     const m = messages.get(String(messageId))
     if (!m || m.target !== target) {
       const err = new Error('message is not assigned to this agent')
       err.code = 'forbidden'
       throw err
     }
-    if (m.status !== STATUS.LEASED) {
-      // A late or duplicated ack must not resurrect a terminal message
-      // (e.g. completed → retry after a redelivery was acked mid-flight).
+    if (leaseToken) {
+      // v3 strict path: the token from the pull must match and the lease must
+      // still be active — one delivery credential, one state transition.
+      if (m.status !== STATUS.LEASED || m.lease_token !== leaseToken || m.lease_until == null || m.lease_until < now) {
+        const err = new Error('lease is no longer active')
+        err.code = 'lease_mismatch'
+        throw err
+      }
+    } else if (m.status !== STATUS.LEASED) {
+      // v2 path (no token): a late or duplicated ack must not resurrect a
+      // terminal message (e.g. completed → retry after a mid-flight ack).
       const err = new Error('message is not currently leased')
       err.code = 'bad_request'
       throw err
@@ -296,6 +322,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     if (outcome === 'completed') {
       m.status = STATUS.COMPLETED
       m.lease_until = null
+      m.lease_token = null
       m.completed_at = now
       m.last_error = null
       counters.acks_completed += 1
@@ -304,11 +331,13 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       if (m.attempts >= maxAttemptsValue) {
         m.status = STATUS.FAILED
         m.lease_until = null
+        m.lease_token = null
         m.completed_at = now
         m.last_error = String(error || 'retry exhausted').slice(0, 300)
       } else {
         m.status = STATUS.QUEUED
         m.lease_until = null
+        m.lease_token = null
         m.last_error = error ? String(error).slice(0, 300) : null
       }
     } else {
@@ -319,11 +348,32 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     persistUpdate(m)
   }
 
+  /** Extend the delivery lease of a leased message (v3). Returns the new lease_until. */
+  function renewLease(messageId, target, leaseToken, now, leaseSeconds) {
+    const m = messages.get(String(messageId))
+    if (!m || m.target !== target || !leaseToken) {
+      const err = new Error('lease is no longer active')
+      err.code = 'lease_mismatch'
+      throw err
+    }
+    if (m.status !== STATUS.LEASED || m.lease_token !== leaseToken || m.lease_until == null || m.lease_until < now) {
+      const err = new Error('lease is no longer active')
+      err.code = 'lease_mismatch'
+      throw err
+    }
+    m.lease_until = now + Math.max(15, Math.min(Math.floor(Number(leaseSeconds) || leaseSecondsValue), 3600))
+    persistUpdate(m)
+    return m.lease_until
+  }
+
   function requeue(messageId, now) {
     const m = messages.get(String(messageId))
-    if (!m || ![STATUS.LEASED, STATUS.FAILED, STATUS.EXPIRED].includes(m.status)) return false
+    if (!m || ![STATUS.LEASED, STATUS.FAILED, STATUS.EXPIRED, STATUS.COMPLETED].includes(m.status)) return false
+    // `completed` is only reachable for operators (the server authorizes that);
+    // resetting attempts lets an exhausted message be pulled again.
     m.status = STATUS.QUEUED
     m.lease_until = null
+    m.lease_token = null
     m.attempts = 0
     m.notified_at = null
     m.last_error = m.last_error ?? 'requeued by operator'
@@ -336,6 +386,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     if (!m || ![STATUS.QUEUED, STATUS.LEASED, STATUS.FAILED, STATUS.EXPIRED].includes(m.status)) return false
     m.status = STATUS.COMPLETED
     m.lease_until = null
+    m.lease_token = null
     m.completed_at = now
     m.last_error = m.last_error ?? 'cancelled by operator'
     persistUpdate(m)
@@ -441,12 +492,15 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   function queueStats(agentNames) {
     const out = {}
     for (const name of agentNames ?? new Set([...messages.values()].map((m) => m.target))) {
-      out[name] = { queued: 0, leased: 0, completed: 0, failed: 0, expired: 0 }
+      out[name] = { queued: 0, leased: 0, completed: 0, failed: 0, expired: 0, oldest_queued_at: null }
     }
     for (const m of messages.values()) {
       const q = out[m.target]
       if (!q) continue
       if (q[m.status] !== undefined) q[m.status] += 1
+      if (m.status === STATUS.QUEUED && (q.oldest_queued_at === null || m.created_at < q.oldest_queued_at)) {
+        q.oldest_queued_at = m.created_at
+      }
     }
     return out
   }
@@ -471,7 +525,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   load()
   if (persist) cleanup(Date.now() / 1000)
   return {
-    create, get, pull, ack, requeue, cancel, statusFor, recentFor, queryMessages,
+    create, get, pull, ack, renewLease, requeue, cancel, statusFor, recentFor, queryMessages,
     getFailedToNotify, markNotified, stuckFor, queueStats, cleanup, close,
     get lastPullAt() { return Object.fromEntries(lastPullAt) },
     get counters() { return { ...counters } },
