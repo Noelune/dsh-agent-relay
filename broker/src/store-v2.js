@@ -78,6 +78,19 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     }
   }
 
+  // Lifecycle transitions update single rows via bound parameters; only the
+  // JSONL fallback rewrites the whole file (a full-table rewrite per ack
+  // caused heavy WAL growth).
+  const insertStmt = db
+    ? db.prepare('INSERT OR REPLACE INTO relay_v2_messages(message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, context, topic, idempotency_key, status, attempts, lease_until, last_error, created_at, expires_at, completed_at, notified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    : null
+  const updateStmt = db
+    ? db.prepare('UPDATE relay_v2_messages SET status=?, attempts=?, lease_until=?, last_error=?, completed_at=?, notified_at=? WHERE message_id=?')
+    : null
+  const deleteStmt = db
+    ? db.prepare('DELETE FROM relay_v2_messages WHERE message_id=?')
+    : null
+
   function idemIndex(origin) {
     let index = byIdempotency.get(origin)
     if (!index) {
@@ -95,9 +108,8 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     if (db) {
       db.exec('BEGIN IMMEDIATE; DELETE FROM relay_v2_messages;')
       try {
-        const insert = db.prepare('INSERT OR REPLACE INTO relay_v2_messages(message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, context, topic, idempotency_key, status, attempts, lease_until, last_error, created_at, expires_at, completed_at, notified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         for (const m of messages.values()) {
-          insert.run(
+          insertStmt.run(
             m.message_id, m.root_id, m.parent_id, m.origin, m.target, m.kind, m.body,
             m.session_ref, m.execution_mode, m.context, m.topic, m.idempotency_key,
             m.status, m.attempts, m.lease_until, m.last_error ?? null,
@@ -119,7 +131,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     if (!persist) return
     mkdirSync(dataDir, { recursive: true })
     if (db) {
-      db.prepare('INSERT OR REPLACE INTO relay_v2_messages(message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, context, topic, idempotency_key, status, attempts, lease_until, last_error, created_at, expires_at, completed_at, notified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+      insertStmt.run(
         m.message_id, m.root_id, m.parent_id, m.origin, m.target, m.kind, m.body,
         m.session_ref, m.execution_mode, m.context, m.topic, m.idempotency_key,
         m.status, m.attempts, m.lease_until, m.last_error ?? null,
@@ -128,6 +140,26 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       return
     }
     appendFileSync(jsonlPath, JSON.stringify({ message: m }) + '\n', 'utf8')
+  }
+
+  /** Persist a lifecycle transition of one message (single-row UPDATE). */
+  function persistUpdate(m) {
+    if (!persist) return
+    if (updateStmt) {
+      updateStmt.run(m.status, m.attempts, m.lease_until, m.last_error ?? null, m.completed_at ?? null, m.notified_at ?? null, m.message_id)
+      return
+    }
+    persistAll() // JSONL fallback has no row addressing — rewrite
+  }
+
+  /** Drop one message row from persistence. */
+  function persistDelete(messageId) {
+    if (!persist) return
+    if (deleteStmt) {
+      deleteStmt.run(messageId)
+      return
+    }
+    persistAll()
   }
 
   function load() {
@@ -162,34 +194,33 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   // -- lifecycle ---------------------------------------------------------
 
   function cleanup(now) {
-    let changed = false
     for (const m of messages.values()) {
       if ((m.status === STATUS.QUEUED || m.status === STATUS.LEASED) && m.expires_at < now) {
         m.status = STATUS.EXPIRED
         m.lease_until = null
-        changed = true
+        persistUpdate(m)
       } else if (m.status === STATUS.LEASED && m.lease_until != null && m.lease_until < now) {
         m.status = STATUS.QUEUED
         m.lease_until = null
-        changed = true
+        persistUpdate(m)
       } else if ((m.status === STATUS.QUEUED || m.status === STATUS.LEASED) && m.attempts >= maxAttemptsValue) {
         m.status = STATUS.FAILED
         m.lease_until = null
         m.completed_at = m.completed_at ?? now
         m.last_error = m.last_error ?? 'attempts exhausted without acknowledgement'
-        changed = true
+        persistUpdate(m)
       }
     }
-    // Retention: drop terminal messages older than RETENTION_SECONDS.
+    // Retention: drop terminal messages older than RETENTION_SECONDS. The
+    // idempotency index must shrink with them or it grows without bound.
     const cutoff = now - RETENTION_SECONDS
-    let purged = false
     for (const [messageId, m] of messages) {
       if ([STATUS.COMPLETED, STATUS.EXPIRED, STATUS.FAILED].includes(m.status) && (m.completed_at ?? m.created_at) < cutoff) {
         messages.delete(messageId)
-        purged = true
+        byIdempotency.get(m.origin)?.delete(m.idempotency_key)
+        persistDelete(messageId)
       }
     }
-    if (changed || purged) persistAll()
   }
 
   function create(message, idempotencyKey) {
@@ -243,8 +274,8 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       m.lease_until = leaseUntil
       m.attempts += 1
       out.push(m)
+      persistUpdate(m)
     }
-    if (out.length) persistAll()
     return out
   }
 
@@ -253,6 +284,13 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     if (!m || m.target !== target) {
       const err = new Error('message is not assigned to this agent')
       err.code = 'forbidden'
+      throw err
+    }
+    if (m.status !== STATUS.LEASED) {
+      // A late or duplicated ack must not resurrect a terminal message
+      // (e.g. completed → retry after a redelivery was acked mid-flight).
+      const err = new Error('message is not currently leased')
+      err.code = 'bad_request'
       throw err
     }
     if (outcome === 'completed') {
@@ -278,7 +316,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
       err.code = 'bad_request'
       throw err
     }
-    persistAll()
+    persistUpdate(m)
   }
 
   function requeue(messageId, now) {
@@ -289,7 +327,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     m.attempts = 0
     m.notified_at = null
     m.last_error = m.last_error ?? 'requeued by operator'
-    persistAll()
+    persistUpdate(m)
     return true
   }
 
@@ -300,7 +338,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     m.lease_until = null
     m.completed_at = now
     m.last_error = m.last_error ?? 'cancelled by operator'
-    persistAll()
+    persistUpdate(m)
     return true
   }
 
@@ -386,7 +424,7 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     const m = messages.get(String(messageId))
     if (!m || m.notified_at != null) return false
     m.notified_at = now
-    persistAll()
+    persistUpdate(m)
     return true
   }
 
@@ -415,7 +453,11 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
 
   function close() {
     if (maintenanceTimer) { clearInterval(maintenanceTimer); maintenanceTimer = null }
-    if (db) { try { db.close() } catch {} db = null }
+    if (db) {
+      try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch { /* best-effort */ }
+      try { db.close() } catch {}
+      db = null
+    }
   }
 
   // Periodic housekeeping (expiry + retention) even when nobody pulls.

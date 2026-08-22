@@ -169,7 +169,9 @@ function readBody(req) {
  * @param {object} deps.config - normalized broker config
  * @param {object} deps.store - message store
  * @param {object} deps.auth - authenticator
- * @param {object} [deps.storeV2] - transitional v2 message store (Phase 1)
+ * @param {object} [deps.storeV2] - v2 message store. The broker entrypoint
+ *   passes one with dataDir resolved against the broker directory; the
+ *   default here is a convenience for tests and standalone use.
  */
 export function createBrokerServer({ config, store, auth, storeV2 = createV2Store({ dataDir: config.dataDir, persist: config.persist, leaseSeconds: config.leaseSeconds, maxAttempts: config.maxAttempts }) }) {
   /**
@@ -492,6 +494,15 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
             sendJson(res, 400, errorBody('bad_request', 'message_id is required'))
             return
           }
+          const existing = storeV2.get(messageId)
+          if (!existing) {
+            sendJson(res, 404, errorBody('no_such_message', 'message is not in a requeue-able state'))
+            return
+          }
+          if (existing.origin !== agent && existing.target !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'only the originator or the recipient may requeue this message'))
+            return
+          }
           if (!storeV2.requeue(messageId, Date.now() / 1000)) {
             sendJson(res, 404, errorBody('no_such_message', 'message is not in a requeue-able state'))
             return
@@ -505,6 +516,15 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           const messageId = String(parsed?.message_id || '').trim()
           if (!messageId) {
             sendJson(res, 400, errorBody('bad_request', 'message_id is required'))
+            return
+          }
+          const existing = storeV2.get(messageId)
+          if (!existing) {
+            sendJson(res, 404, errorBody('no_such_message', 'message is not in a cancellable state'))
+            return
+          }
+          if (existing.origin !== agent && existing.target !== agent) {
+            sendJson(res, 403, errorBody('forbidden', 'only the originator or the recipient may cancel this message'))
             return
           }
           if (!storeV2.cancel(messageId, Date.now() / 1000)) {

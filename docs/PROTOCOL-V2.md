@@ -170,7 +170,9 @@ lease expires or it is acked.
 ### `POST /v1/ack` — acknowledge a leased message (auth)
 
 Body: `{ "agent"?, "message_id", "outcome": "completed"|"retry", "error"? }`.
-Only the recipient may ack (`403` otherwise). `completed` finalizes the message;
+Only the recipient may ack (`403` otherwise), and only while the message is
+leased (`400` otherwise — a late or duplicated ack never resurrects a
+terminal message). `completed` finalizes the message;
 `retry` re-queues it (`attempts`+1; over `maxAttempts` → `failed`). `error` is
 recorded (≤300 chars).
 
@@ -192,12 +194,14 @@ Body: `{ "agent"?, "message_id"?, "root_id"?, "origin"?, "target"?, "kind"?,
 **origin or target** of (never other agents' messages), newest first, **with
 body**. `since` is a `created_at` cutoff (epoch seconds).
 
-### Admin helpers (any authenticated local agent)
+### Admin helpers (authenticated parties only)
 
 - `POST /v1/admin/requeue` — `{ "message_id" }`; revives a `leased`/`failed`/`expired`
-  message to `queued` (resets `attempts`). `404` if not requeue-able.
+  message to `queued` (resets `attempts`). `404` if not requeue-able. Only the
+  originator or the recipient of the message may call this (`403` otherwise).
 - `POST /v1/admin/cancel` — `{ "message_id" }`; marks a non-terminal message
-  `completed` so it is never delivered. `404` if not cancellable.
+  `completed` so it is never delivered. `404` if not cancellable. Only the
+  originator or the recipient of the message may call this (`403` otherwise).
 - `POST /v1/admin/status` — `{ "agent"?, "limit"? }`; lists non-terminal messages
   targeting the agent (`queued`/`leased`/`failed`/`expired`, last 7 days) with a
   `body_preview`, so an operator can decide what to requeue/cancel.

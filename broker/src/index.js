@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { loadConfig, normalizeConfig } from './config.js'
 import { createAuthenticator } from './auth.js'
 import { createStore } from './store.js'
+import { createV2Store } from './store-v2.js'
 import { createBrokerServer } from './server.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -35,6 +36,14 @@ const store = createStore({
   storage: config.storage,
   maxAttempts: config.maxAttempts,
 })
+// Both stores resolve dataDir against the broker directory — a relative
+// dataDir (the './data' default) must not depend on the process CWD.
+const storeV2 = createV2Store({
+  dataDir: resolve(BROKER_DIR, config.dataDir),
+  persist: config.persist,
+  leaseSeconds: config.leaseSeconds,
+  maxAttempts: config.maxAttempts,
+})
 const auth = createAuthenticator({
   secret: config.secret,
   agents: config.agents,
@@ -43,7 +52,7 @@ const auth = createAuthenticator({
   rateLimitLoopback: config.rateLimitLoopback,
   rateLimitRemote: config.rateLimitRemote,
 })
-const server = createBrokerServer({ config, store, auth })
+const server = createBrokerServer({ config, store, auth, storeV2 })
 
 server.listen(config.port, config.host, () => {
   console.log(`[relay-broker] listening on http://${config.host}:${config.port}`)
@@ -57,6 +66,7 @@ server.on('error', (err) => {
 
 function shutdown() {
   store.close?.()
+  storeV2.close?.()
   server.close(() => process.exit(0))
 }
 process.once('SIGINT', shutdown)
