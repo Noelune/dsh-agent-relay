@@ -2,6 +2,43 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed — broker correctness and resource use
+
+- **v2 store `dataDir` resolves against the broker directory** — a relative
+  `dataDir` (the `./data` default) no longer depends on the process CWD, so
+  the v2 SQLite/JSONL files always land beside the v1 store. The broker
+  entrypoint now creates the v2 store itself and closes it on shutdown
+  (previously only the v1 store was closed); `close()` also runs
+  `PRAGMA wal_checkpoint(TRUNCATE)`.
+- **Lifecycle transitions persist as single-row UPDATEs** instead of rewriting
+  the whole table on every ack/pull/requeue/cancel. Full-table rewrites caused
+  heavy WAL growth (a multi-MB WAL against a 128 KB database was observed in
+  production). The JSONL fallback keeps its rewrite semantics.
+- **The idempotency index is pruned together with retention purges** — it
+  previously grew without bound for the lifetime of the process.
+- **v2 `POST /v1/ack` requires the message to be leased** (`400` otherwise) —
+  a late or duplicated ack can no longer resurrect a terminal message back to
+  `queued` (e.g. a retry ack arriving after a redelivery was acked mid-flight).
+
+### Changed — admin endpoints and plugin configuration
+
+- **`/v1/admin/requeue` and `/v1/admin/cancel` are restricted to the
+  originator or the recipient** of the message (`403` otherwise), matching the
+  visibility rules of `/v1/status` and the per-mode ACL.
+- **dsh plugin: the credential-vault fallback for `secretRef` is configured,
+  not built in.** Resolving a secret through a Python module exposing
+  `reveal_entry(name)` requires the new `vaultModule` setting
+  (`DSH_RELAY_VAULT_MODULE` env / `vault_module` in `~/.dsh/agent-relay.json`);
+  no installation layout is hard-coded anymore.
+- **dsh plugin: the system-prompt guidance and the `agent_relay_send`
+  description derive the roster and broker endpoint from configuration**
+  (`circleMembers` / `DSH_RELAY_CIRCLE_MEMBERS` / `circle_members`), falling
+  back to pointing at `agent_relay_peers` instead of a hard-coded member list.
+- **dsh plugin: the default relay-session cwd falls back to the user's home
+  directory** instead of a Windows-specific `C:/` path.
+
 ## [0.4.0] — 2026-08-15
 
 ### Added — v2 wire protocol (self-use compatible) + advanced dsh plugin

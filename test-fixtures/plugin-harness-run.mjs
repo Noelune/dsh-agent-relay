@@ -104,6 +104,9 @@ const plugin = applyPlugin(ctx, {
   brokerUrl: `http://127.0.0.1:${port}`,
   agentName: 'dsh',
   secretRef: 'RELAY_SHARED_SECRET',
+  // Any existing file works — the mock subprocess ignores it; this keeps the
+  // secretRef → vault-module escape hatch exercised end to end.
+  vaultModule: process.cwd() + '/memory-mock.mjs',
   memoryCmd: `node ${process.cwd()}/memory-mock.mjs`,
 })
 await plugin.ready
