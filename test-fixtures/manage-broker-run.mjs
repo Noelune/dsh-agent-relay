@@ -26,6 +26,7 @@ const ctx = {
   agents: { get: () => null, list: () => [], create: async () => { throw new Error('not used') }, resume: async () => { throw new Error('not used') } },
   tools: { register(d) { recorded.tools.push(d); return () => {} } },
   systemPrompt: { section() { return () => {} } },
+  webServer: { register() { return () => {} } },
   timeout: (a, b) => (typeof a === 'function' ? setTimeout(a, b) : new Promise((r) => setTimeout(r, a))),
   interval(fn, ms) { const t = setInterval(fn, ms); return () => clearInterval(t) },
   effect(fn) { recorded.cleanups.push(fn); return () => {} },

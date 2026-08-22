@@ -6,6 +6,8 @@ import { createStore } from './broker/src/store.js'
 import { createAuthenticator } from './broker/src/auth.js'
 import { createBrokerServer } from './broker/src/server.js'
 import { createV2Store } from './broker/src/store-v2.js'
+import { createServer as createHttpServer } from 'node:http'
+import { EventEmitter } from 'node:events'
 import { RelayClientV2 } from './lib/client-v2.js'
 import { apply as applyPlugin } from './lib/index.js'
 
@@ -33,7 +35,7 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const port = server.address().port
 
 // ---- mock dsh host ----
-const recorded = { tools: [], permissions: [], approvals: [], sessions: [] }
+const recorded = { tools: [], permissions: [], approvals: [], sessions: [], routes: [] }
 const agentHandles = new Map()
 
 class MockAgent {
@@ -66,6 +68,17 @@ const ctx = {
   },
   tools: { register(def) { recorded.tools.push(def); return () => {} } },
   systemPrompt: { section() { return () => {} } },
+  webServer: { register(route) { recorded.routes.push(route); return () => {} } },
+  credentials: { resolve: async () => undefined },
+  subprocess: {
+    async resolveExecutable() { return 'python' },
+    spawn() {
+      const stdout = new EventEmitter()
+      stdout.setEncoding = () => {}
+      queueMicrotask(() => stdout.emit('data', SHARED))
+      return { stdout, done: Promise.resolve({ exitCode: 0 }) }
+    },
+  },
   timeout: (a, b) => (typeof a === 'function' ? setTimeout(a, b) : new Promise((r) => setTimeout(r, a))),
   interval(fn, ms) { const t = setInterval(fn, ms); return () => clearInterval(t) },
   effect() { return () => {} },
@@ -79,17 +92,21 @@ const ctx = {
       case 'approval': return { setPolicy: (agent, policy) => { recorded.approvals.push(policy) } }
       case 'sessionTitle': return { rename: async () => {} }
       case 'sessionQuery': return { listSessions: async () => [] }
+      case 'webServer': return this.webServer
+      case 'credentials': return this.credentials
+      case 'subprocess': return this.subprocess
       default: return null
     }
   },
 }
 
-applyPlugin(ctx, {
+const plugin = applyPlugin(ctx, {
   brokerUrl: `http://127.0.0.1:${port}`,
   agentName: 'dsh',
-  secret: SHARED,
+  secretRef: 'RELAY_SHARED_SECRET',
   memoryCmd: `node ${process.cwd()}/memory-mock.mjs`,
 })
+await plugin.ready
 
 const names = recorded.tools.map((t) => t.name)
 if (names.length !== 5 || !names.every((n) => ['agent_relay_send', 'agent_relay_status', 'agent_relay_history', 'agent_relay_peers', 'agent_relay_retry'].includes(n))) {
@@ -149,6 +166,28 @@ if (!memRequest.context || !memRequest.context.includes('共享记忆摘录') ||
   process.exit(1)
 }
 
-console.log('OK read-mode reply / write-mode preset / tools / completed / memory-bridge')
+// ---- browser status route: real HTTP response contains only safe metadata ----
+const statusRoute = recorded.routes.find((route) => route.path === '/api/dsh-agent-relay/status')
+if (!statusRoute) { console.error('FAIL: status route was not registered'); process.exit(1) }
+const statusServer = createHttpServer((req, res) => {
+  Promise.resolve(statusRoute.handler(req, res)).catch((error) => {
+    res.writeHead(500, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: String(error?.message || error) }))
+  })
+})
+await new Promise((resolve) => statusServer.listen(0, '127.0.0.1', resolve))
+const statusPort = statusServer.address().port
+const statusResponse = await fetch(`http://127.0.0.1:${statusPort}/api/dsh-agent-relay/status`)
+const statusText = await statusResponse.text()
+if (statusResponse.status !== 200) { console.error('FAIL: status route HTTP ' + statusResponse.status + ': ' + statusText); process.exit(1) }
+const status = JSON.parse(statusText)
+if (!status.broker || !Array.isArray(status.peers) || !Array.isArray(status.recentMessages)) { console.error('FAIL: incomplete status payload'); process.exit(1) }
+if (statusText.includes('message_id') || statusText.includes('带记忆的请求') || statusText.includes('共享记忆摘录')) {
+  console.error('FAIL: status payload exposed private relay fields')
+  process.exit(1)
+}
+await new Promise((resolve) => statusServer.close(resolve))
+
+console.log('OK read-mode reply / write-mode preset / tools / completed / memory-bridge / status-route')
 await new Promise((resolve) => server.close(resolve))
 process.exit(0)

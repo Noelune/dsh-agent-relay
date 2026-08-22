@@ -14,6 +14,7 @@ sessions/
 
 # Probe/tooling files
 .dsh-*
+.playwright-cli/
 .idea/
 .vscode/
 *.swp
