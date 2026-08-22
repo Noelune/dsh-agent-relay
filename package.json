@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-relay",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Multi-agent collaboration relay for DeepSeek Harness — send and receive messages between local agents (dsh, Codex, Claude, Hermes, OpenClaw, …) through a small loopback-first broker with HMAC auth. Ships the broker, the dsh plugin, a CLI client and a Python client. · DSH 多 Agent 协作中继：本地 Agent 之间经轻量 broker 安全互发消息。",
   "type": "module",
   "main": "lib/index.js",
