@@ -44,6 +44,17 @@ node setup/setup.js selfcheck
 
 ### 4. Connect agents
 
+Self-use shortcut — onboard a member in one step (secret generation, broker
+YAML block, agent-side `.env` entry, default ACLs, post-write verification):
+
+```sh
+node setup/add-member.mjs <name>          # full member, read mode, no write
+node setup/add-member.mjs <name> --show   # also print the generated secret once
+```
+
+Restart the broker afterwards (exact commands are printed). Fine-grained
+ACLs: `--read-targets`, `--write-targets`, `--no-inbound`.
+
 **dsh (recommended):**
 
 ```sh
@@ -83,6 +94,23 @@ node adapters/cli/relay.mjs watch --agent beta --secret <secret>
 node adapters/cli/relay.mjs send beta "hello" --agent alpha --secret <secret>
 # terminal 1 prints the message
 ```
+
+### 6. Keep broker YAML and agent .env secrets in sync
+
+Self-use deployments keep member secrets in two places: the broker YAML
+(`agents.<name>.secret`) and the agent-side `.env`
+(`AGENT_RELAY_<NAME>_SECRET`). When they drift, members start receiving 401s.
+Check — and optionally repair — with:
+
+```sh
+node setup/sync-secrets.mjs           # check: exit 1 on drift
+node setup/sync-secrets.mjs --apply   # copy .env values into the YAML (backs up first)
+```
+
+Secret values are never printed. Override the default locations with
+`--config <yaml>` / `--env <file>`. New members are created with
+`setup/add-member.mjs`, which writes both stores consistently from the
+start; this tool then guards them against later drift.
 
 ---
 

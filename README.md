@@ -58,6 +58,10 @@
 
 ## 🏗️ 系统架构与工作流
 
+Relay 同时支持两个协议世代：旧客户端继续使用 v1 兼容层；新客户端使用
+`docs/PROTOCOL-V2.md` 定义的 v2/v3 线协议。v2 使用 lease/ack 投递，v3 在
+v2 基础上增加 `X-Agent-Relay-Key-Id` 密钥轮换；两者共用同一组 `/v1/*` 路由。
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -66,15 +70,15 @@ sequenceDiagram
     participant C as Claude Code (Agent B)
 
     Note over D,C: Loopback 架构下基于 HMAC-SHA256 的通信流程
-    D->>B: POST /messages (HMAC Signed) <br> { to: "claude", body: { task: "code_review" } }
-    Note over B: 1. 校验 Timestamp < 300s<br>2. 验证 HMAC-SHA256 签名<br>3. 写入本地持久化队列 (TTL 7d)
-    B-->>D: 201 Created (Message ID: UUID)
-
-    C->>B: GET /messages?since=cursor (HMAC Signed)
-    B-->>C: 200 OK [Unread Messages Array]
+    D->>B: POST /v1/messages (v2/v3 HMAC Signed)
+    Note over B: 校验时间戳/签名/ACL<br/>写入 SQLite 或 JSONL 队列
+    B-->>D: 200 {message_id, root_id, protocol_version}
+    C->>B: POST /v1/pull (lease)
+    B-->>C: 200 {messages, lease_token}
     Note over C: Agent 接收消息并执行相关任务
-    C->>B: POST /messages (Reply with ack=true)
-    B-->>D: 确认投递，推送至 dsh 侧边栏状态栏
+    C->>B: POST /v1/lease/renew (长任务可选)
+    C->>B: POST /v1/ack (completed 或 retry)
+    B-->>D: 状态可由 /v1/status 查询，回复通过 parent_id 关联
 ```
 
 ---
@@ -126,13 +130,14 @@ node adapters/cli/relay.mjs recv --agent beta --secret $DSH_RELAY_SECRET
 
 ---
 
-## 📜 Wire Protocol v1.0 规范
+## 📜 Wire Protocol 规范
 
-所有语言客户端适配器（JS Plugin / JS CLI / Python Client）必须严格遵循 Wire Protocol v1.0 标准规范。
+所有语言客户端适配器必须严格遵循对应的 Wire Protocol 规范。旧版 v1 见
+`docs/PROTOCOL.md`；当前 v2/v3 主流程见 `docs/PROTOCOL-V2.md`。
 
 ### 请求头鉴权规范
 
-任何非 `GET /` 请求均须包含以下 HTTP 请求头：
+旧版 v1 客户端使用以下请求头：
 
 ```http
 X-Relay-Agent: <agent_name>
@@ -140,7 +145,11 @@ X-Relay-Timestamp: <unix_epoch_seconds>
 X-Relay-Signature: <hex_hmac_sha256>
 ```
 
-**签名推导公式**：
+v2/v3 客户端使用 `X-Agent-Relay-Agent`、`X-Agent-Relay-Timestamp`、
+`X-Agent-Relay-Signature`，v3 还可增加 `X-Agent-Relay-Key-Id`。签名细节和
+canonical JSON 字节规则以 `docs/PROTOCOL-V2.md` 为准，不要将两代格式混用。
+
+旧版 v1 签名推导公式：
 ```text
 SigningString = Method + "\n" + PathnameWithQuery + "\n" + TimestampSeconds + "\n" + RawBody
 Signature     = HMAC-SHA256(secretKey, SigningString).hex()

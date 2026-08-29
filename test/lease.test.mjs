@@ -58,9 +58,9 @@ test('lease: expired lease re-queues the message', async () => {
   const { store, dir } = tempStore()
   try {
     store.add(msg('1', 'alpha', 'beta'))
-    store.pull('beta', 10, 0) // 0s lease -> leaseUntil ~ now
+    store.pull('beta', 10, 0.02) // short lease: still active for the immediate second pull
     assert.equal(store.pull('beta', 10, 600).length, 0)
-    await new Promise((r) => setTimeout(r, 10)) // let the 0s lease expire
+    await new Promise((r) => setTimeout(r, 40)) // let the short lease expire
     store.leaseSweep()
     const re = store.pull('beta', 10, 600)
     assert.equal(re.length, 1)

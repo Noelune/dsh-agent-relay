@@ -39,7 +39,9 @@
 - **隐私保护设计 (Privacy-by-Design)**  
   消息体只为可靠投递保存在本机 TTL 队列中，Broker 与参考客户端**不会把消息体写入应用日志或遥测**；默认回环部署时数据不离开本机。
 - **dsh 一级工具无缝集成 (First-Class Cordis Plugin)**  
-  针对 DeepSeek Harness 提供原生 Cordis 插件，注册 `relay_send`、`relay_recv`、`relay_peers`、`relay_history` 模型工具，并提供图形化侧边栏状态面板。
+  针对 DeepSeek Harness 提供原生 Cordis 插件，注册 `agent_relay_send`、`agent_relay_status`、`agent_relay_history`、`agent_relay_peers`、`agent_relay_retry` 五个模型工具，并提供图形化侧边栏状态面板。
+- **v2/v3 线协议（v1 兼容层保留）**
+  新客户端使用 canonical JSON、lease/ack、per-mode ACL 和可选 key-id 密钥轮换；旧 v1 客户端继续可用，详见 `docs/PROTOCOL-V2.md`。
 
 ---
 
@@ -64,15 +66,14 @@ sequenceDiagram
     participant C as Claude Code (Agent B)
 
     Note over D,C: Loopback 架构下基于 HMAC-SHA256 的通信流程
-    D->>B: POST /messages (HMAC Signed) <br> { to: "claude", body: { task: "code_review" } }
-    Note over B: 1. 校验 Timestamp < 300s<br>2. 验证 HMAC-SHA256 签名<br>3. 写入本地持久化队列 (TTL 7d)
-    B-->>D: 201 Created (Message ID: UUID)
-
-    C->>B: GET /messages?since=cursor (HMAC Signed)
-    B-->>C: 200 OK [Unread Messages Array]
-    Note over C: Agent 接收消息并执行相关任务
-    C->>B: POST /messages (Reply with ack=true)
-    B-->>D: 确认投递，推送至 dsh 侧边栏状态栏
+    D->>B: POST /v1/messages (v2/v3 HMAC Signed)
+    Note over B: 校验时间戳/签名/ACL<br/>写入 SQLite 或 JSONL 队列
+    B-->>D: 200 {message_id, root_id, protocol_version}
+    C->>B: POST /v1/pull (lease)
+    B-->>C: 200 {messages, lease_token}
+    C->>B: POST /v1/lease/renew (长任务可选)
+    C->>B: POST /v1/ack (completed 或 retry)
+    B-->>D: 通过 /v1/status 查询状态，回复用 parent_id 关联
 ```
 
 ---
@@ -124,13 +125,14 @@ node adapters/cli/relay.mjs recv --agent beta --secret $DSH_RELAY_SECRET
 
 ---
 
-## 📜 Wire Protocol v1.0 规范
+## 📜 Wire Protocol 规范
 
-所有语言客户端适配器（JS Plugin / JS CLI / Python Client）必须严格遵循 Wire Protocol v1.0 标准规范。
+所有语言客户端适配器必须严格遵循对应的 Wire Protocol 规范。旧版 v1 见
+`docs/PROTOCOL.md`；当前 v2/v3 主流程见 `docs/PROTOCOL-V2.md`。
 
 ### 请求头鉴权规范
 
-任何非 `GET /` 请求均须包含以下 HTTP 请求头：
+旧版 v1 客户端使用以下请求头：
 
 ```http
 X-Relay-Agent: <agent_name>
@@ -138,7 +140,11 @@ X-Relay-Timestamp: <unix_epoch_seconds>
 X-Relay-Signature: <hex_hmac_sha256>
 ```
 
-**签名推导公式**：
+v2/v3 客户端使用 `X-Agent-Relay-Agent`、`X-Agent-Relay-Timestamp`、
+`X-Agent-Relay-Signature`，v3 还可增加 `X-Agent-Relay-Key-Id`。签名细节和
+canonical JSON 字节规则以 `docs/PROTOCOL-V2.md` 为准，不要将两代格式混用。
+
+旧版 v1 签名推导公式：
 ```text
 SigningString = Method + "\n" + PathnameWithQuery + "\n" + TimestampSeconds + "\n" + RawBody
 Signature     = HMAC-SHA256(secretKey, SigningString).hex()
@@ -151,7 +157,7 @@ Signature     = HMAC-SHA256(secretKey, SigningString).hex()
 | 路径 | 功能说明 |
 |---|---|
 | `broker/` | Relay 中继核心服务（零 npm 运行依赖，包含配置、HMAC 鉴权、SQLite/JSONL 持久化与 HTTP 服务）+ Dockerfile |
-| `lib/` | dsh 插件核心：提供模型工具接口 (`relay_send` / `relay_recv` / `relay_peers` / `relay_history`) 与客户端库 |
+| `lib/` | dsh 插件核心：提供五个 `agent_relay_*` 模型工具、v2/v3 客户端、v1 兼容层、workspace 租约隔离与侧边栏状态面板 |
 | `adapters/cli/` | 零第三方依赖 Node.js CLI 客户端适配器 |
 | `adapters/hermes/` | 纯 Python 标准库客户端适配器 + Hermes 风格 Agent 集成示例 |
 | `adapters/openclaw/` | OpenClaw 框架集成适配说明文档 |
