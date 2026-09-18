@@ -51,6 +51,33 @@ test('extractReplyText returns the latest assistant text after the boundary', ()
   assert.equal(extractReplyText(null, 0), '')
 })
 
+/**
+ * Host contract: DSH core 0.1.5-rc.2 dropped the iterable `session.events` in
+ * favour of `snapshotEvents(fromSeq)`. That silently broke reply extraction —
+ * the relay claimed a session, got no text back and the requester saw a timeout.
+ * Both host shapes must keep working, and `fromSeq` is boundary-inclusive.
+ */
+test('extractReplyText supports the snapshotEvents(fromSeq) host accessor', () => {
+  const events = [
+    { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'stale' }] } } },
+    { seq: 3, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'answer from snapshot' }] } } },
+  ]
+  const session = { snapshotEvents: (fromSeq) => events.filter((e) => e.seq >= fromSeq) }
+  assert.equal(extractReplyText(session, 0), 'answer from snapshot')
+  assert.equal(extractReplyText(session, 3), 'answer from snapshot')
+  assert.equal(extractReplyText(session, 4), '')
+
+  // The accessor is preferred; a session exposing both must not double-read.
+  const both = { events: [{ seq: 9, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'from array' }] } } }], snapshotEvents: (from) => events.filter((e) => e.seq >= from) }
+  assert.equal(extractReplyText(both, 0), 'answer from snapshot')
+})
+
+test('extractReplyText survives a throwing or empty host accessor', () => {
+  assert.equal(extractReplyText({ snapshotEvents: () => { throw new Error('host moved on') } }, 0), '')
+  assert.equal(extractReplyText({ snapshotEvents: () => undefined }, 0), '')
+  assert.equal(extractReplyText({}, 0), '')
+})
+
 test('createJsonStore persists, TTL-expires, and is atomic', () => {
   const dir = mkdtempSync(join(tmpdir(), 'relay-store-'))
   const file = join(dir, 'store.json')
