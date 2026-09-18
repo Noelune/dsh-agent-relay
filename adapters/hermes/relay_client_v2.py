@@ -32,6 +32,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
 
 SIGNATURE_HEADERS = {
@@ -40,7 +41,8 @@ SIGNATURE_HEADERS = {
     "timestamp": "X-Agent-Relay-Timestamp",
     "signature": "X-Agent-Relay-Signature",
 }
-DEFAULT_REQUEST_TTL_SECONDS = 3600
+DEFAULT_REQUEST_TTL_SECONDS = 7 * 86400  # retention must outlive an offline peer
+MAX_WAIT_SECONDS = 120  # broker ceiling for a held long-poll
 
 
 class RelayError(RuntimeError):
@@ -70,7 +72,7 @@ class RelayClientV2:
         self.key_id = key_id.strip()
         self.timeout = timeout
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, timeout: float | None = None) -> Any:
         has_body = method.upper() not in ("GET", "HEAD")
         body = canonical_body(payload or {}) if has_body else b""
         timestamp = str(int(time.time()))
@@ -89,7 +91,7 @@ class RelayClientV2:
             method=method,
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout if timeout is not None else self.timeout) as resp:
                 text = resp.read().decode("utf-8")
                 return json.loads(text) if text else None
         except urllib.error.HTTPError as exc:
@@ -103,6 +105,43 @@ class RelayClientV2:
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/healthz", {})
 
+    def send_request_detailed(
+        self,
+        target: str,
+        body: str,
+        *,
+        session_ref: str,
+        idempotency_key: str,
+        ttl_seconds: int = DEFAULT_REQUEST_TTL_SECONDS,
+        execution_mode: str = "read",
+        context: str = "",
+        topic: str = "",
+        root_id: str = "",
+    ) -> dict[str, Any]:
+        """Send a request and return the broker's answer, including presence.
+
+        ``target_online`` is False when the peer has not claimed anything
+        recently — the caller learns that immediately instead of after the
+        message silently expired.
+        """
+        payload: dict[str, Any] = {
+            "origin": self.agent,
+            "target": str(target).strip().lower(),
+            "kind": "request",
+            "body": body,
+            "session_ref": session_ref,
+            "idempotency_key": idempotency_key,
+            "ttl_seconds": ttl_seconds,
+            "execution_mode": execution_mode,
+        }
+        if root_id:
+            payload["root_id"] = str(root_id)
+        if context:
+            payload["context"] = context
+        if topic:
+            payload["topic"] = topic
+        return self._request("POST", "/v1/messages", payload)
+
     def send_request(
         self,
         target: str,
@@ -114,22 +153,13 @@ class RelayClientV2:
         execution_mode: str = "read",
         context: str = "",
         topic: str = "",
+        root_id: str = "",
     ) -> str:
-        payload: dict[str, Any] = {
-            "origin": self.agent,
-            "target": str(target).strip().lower(),
-            "kind": "request",
-            "body": body,
-            "session_ref": session_ref,
-            "idempotency_key": idempotency_key,
-            "ttl_seconds": ttl_seconds,
-            "execution_mode": execution_mode,
-        }
-        if context:
-            payload["context"] = context
-        if topic:
-            payload["topic"] = topic
-        data = self._request("POST", "/v1/messages", payload)
+        data = self.send_request_detailed(
+            target, body, session_ref=session_ref, idempotency_key=idempotency_key,
+            ttl_seconds=ttl_seconds, execution_mode=execution_mode, context=context,
+            topic=topic, root_id=root_id,
+        )
         return str(data["message_id"])
 
     def send_reply(self, incoming: dict[str, Any], body: str, idempotency_key: str) -> str:
@@ -148,14 +178,98 @@ class RelayClientV2:
         data = self._request("POST", "/v1/messages", payload)
         return str(data["message_id"])
 
-    def pull(self, limit: int | None = None, lease_seconds: int | None = None) -> list[dict[str, Any]]:
+    def pull(
+        self,
+        limit: int | None = None,
+        lease_seconds: int | None = None,
+        *,
+        wait_seconds: float = 0,
+        match_root_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Claim queued messages.
+
+        ``wait_seconds`` makes it a long-poll held open by the broker (no client
+        polling loop); ``match_root_id`` restricts the claim to one conversation
+        so waiting for a specific answer does not steal the rest of the inbox.
+        """
         payload: dict[str, Any] = {"agent": self.agent}
         if limit is not None:
             payload["limit"] = limit
         if lease_seconds is not None:
             payload["lease_seconds"] = lease_seconds
-        data = self._request("POST", "/v1/pull", payload)
+        if match_root_id:
+            payload["match_root_id"] = str(match_root_id)
+        timeout: float | None = None
+        if wait_seconds > 0:
+            held = min(float(wait_seconds), float(MAX_WAIT_SECONDS))
+            payload["wait_seconds"] = held
+            timeout = held + 10.0  # the held request outlives the default socket timeout
+        data = self._request("POST", "/v1/pull", payload, timeout=timeout)
         return [m for m in (data.get("messages") or []) if isinstance(m, dict)]
+
+    def ask(
+        self,
+        target: str,
+        body: str,
+        *,
+        session_ref: str = "",
+        idempotency_key: str = "",
+        context: str = "",
+        execution_mode: str = "read",
+        timeout_seconds: float = 240,
+        wait_offline: bool = False,
+    ) -> dict[str, Any]:
+        """Send a request and block until the peer answers or the deadline passes.
+
+        Returns ``{"ok", "message_id", "root_id", "target_online", "reply"|"reason",
+        "waited_seconds"}``. This is the primitive that makes a handoff feel like a
+        function call rather than a mailbox.
+        """
+        root_id = uuid.uuid4().hex
+        started = time.time()
+        sent = self.send_request_detailed(
+            target, body, session_ref=session_ref or self.agent,
+            idempotency_key=idempotency_key or f"ask:{root_id}",
+            execution_mode=execution_mode, context=context, root_id=root_id,
+        )
+        result = {
+            "message_id": str(sent["message_id"]),
+            "root_id": str(sent.get("root_id") or root_id),
+            "target_online": bool(sent.get("target_online", True)),
+        }
+        # Nobody is listening: answer honestly now instead of burning the
+        # deadline. The request is retained for days either way.
+        if not result["target_online"] and not wait_offline:
+            return {
+                "ok": False, **result,
+                "reason": "peer_offline",
+                "waited_seconds": 0,
+                "hint": sent.get("hint") or f"请求已留存，等 {target} 上线后会自动投递",
+            }
+        deadline = started + max(1.0, float(timeout_seconds))
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return {
+                    "ok": False, **result,
+                    "reason": "peer_offline" if not result["target_online"] else "timeout",
+                    "waited_seconds": round(time.time() - started),
+                    "hint": sent.get("hint") or "请求已留存，稍后可用 pull 或 status 取回结果",
+                }
+            held = min(remaining, float(MAX_WAIT_SECONDS))
+            messages = self.pull(limit=4, lease_seconds=300, wait_seconds=held, match_root_id=result["root_id"])
+            answer = next((m for m in messages if m.get("kind") == "reply"), messages[0] if messages else None)
+            if answer:
+                try:
+                    self.ack(answer["message_id"], "completed", lease_token=answer.get("lease_token") or "")
+                except RelayError:
+                    pass
+                return {
+                    "ok": True, **result,
+                    "reply": answer.get("body") or "",
+                    "reply_message_id": answer.get("message_id"),
+                    "waited_seconds": round(time.time() - started),
+                }
 
     def ack(self, message_id: str, outcome: str, error: str = "", lease_token: str = "") -> None:
         """Acknowledge a leased message. With a ``lease_token`` (v3) the ack is

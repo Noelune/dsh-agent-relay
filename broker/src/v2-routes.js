@@ -11,6 +11,9 @@ import {
   EXECUTION_MODES as V2_MODES,
   TTL_MIN_SECONDS as V2_TTL_MIN,
   TTL_MAX_SECONDS as V2_TTL_MAX,
+  DEFAULT_REQUEST_TTL_SECONDS as V2_TTL_DEFAULT,
+  PRESENCE_STALE_SECONDS,
+  MAX_WAIT_SECONDS,
   RelayMessage,
   codePointLength,
   truncateCodePoints,
@@ -18,7 +21,14 @@ import {
 import { sendJson, errorBody, parseJsonObject, cryptoRandomHex } from './http-utils.js'
 import { v2CanSend, v2PublicMessage } from './v2-auth.js'
 
-export function handleV2Routes({ config, storeV2, agent, req, res, path, rawBody, notifyFailedSenders }) {
+/**
+ * @param {object} deps
+ * @param {(agent: string) => void} [deps.wakeAgent] - hand a waiting long-poll
+ *   puller its freshly created message (see broker/src/server.js).
+ * @param {(agent: string, opts: object) => Promise<object[]>} [deps.waitFor] -
+ *   hold a pull request until a message arrives or `waitSeconds` elapses.
+ */
+export async function handleV2Routes({ config, storeV2, agent, req, res, path, rawBody, notifyFailedSenders, wakeAgent, waitFor }) {
   if (req.method === 'POST' && path === '/v1/messages') {
     const parsed = parseJsonObject(rawBody)
     if (!parsed) {
@@ -54,7 +64,7 @@ export function handleV2Routes({ config, storeV2, agent, req, res, path, rawBody
       return
     }
     const now = Date.now() / 1000
-    const requestedTtl = Math.floor(Number(parsed.ttl_seconds) || 3600)
+    const requestedTtl = Math.floor(Number(parsed.ttl_seconds) || V2_TTL_DEFAULT)
     const ttl = Math.max(V2_TTL_MIN, Math.min(requestedTtl, V2_TTL_MAX))
     const topic = truncateCodePoints(parsed.topic, 200)
     let rootId = parsed.root_id ? String(parsed.root_id) : null
@@ -108,7 +118,26 @@ export function handleV2Routes({ config, storeV2, agent, req, res, path, rawBody
       allow_shared_write: kind === 'request' ? allowSharedWrite : false,
     })
     const { message_id, created } = storeV2.create(message, idempotencyKey)
-    sendJson(res, 200, { message_id, created, protocol_version: V2_VERSION })
+    if (created && typeof wakeAgent === 'function') wakeAgent(target)
+    // Presence is reported on every accepted send so the caller learns *now*
+    // that nobody is listening, instead of discovering it an hour later after
+    // the message silently expired. The 2026-09-19 audit showed 4 of 6 circle
+    // members had never pulled since the broker restart, so this is the normal
+    // case, not the error case. Deliberately additive: the send still succeeds
+    // (the message is durably queued) and `message_id` / `created` are unchanged.
+    const lastSeenAt = storeV2.lastPullAt?.[target] ?? null
+    const targetOnline = lastSeenAt != null && now - lastSeenAt <= PRESENCE_STALE_SECONDS
+    sendJson(res, 200, {
+      message_id,
+      created,
+      root_id: message.root_id,
+      protocol_version: V2_VERSION,
+      target_online: targetOnline,
+      last_seen_at: lastSeenAt,
+      ...(targetOnline || !created ? {} : {
+        hint: `目标 ${target} 自 ${lastSeenAt ? new Date(lastSeenAt * 1000).toISOString() : '未连接过'} 未取件，消息已留存 ${Math.round(ttl / 3600)} 小时等待投递；无人处理时发起方会收到未送达通知`,
+      }),
+    })
     return
   }
 
@@ -140,8 +169,26 @@ export function handleV2Routes({ config, storeV2, agent, req, res, path, rawBody
       }
       leaseSeconds = Math.max(15, Math.min(Math.floor(raw), 3600))
     }
-    const messages = storeV2.pull(agent, Date.now() / 1000, { limit, leaseSeconds })
+    // Optional long-poll: hold the request until a message lands or `wait_seconds`
+    // elapses, so delivery latency stops being tied to the client's poll period.
+    let waitSeconds = 0
+    if (parsed.wait_seconds !== undefined) {
+      const raw = Number(parsed.wait_seconds)
+      if (!Number.isFinite(raw) || raw < 0) {
+        sendJson(res, 400, errorBody('bad_request', 'wait_seconds must be a non-negative number'))
+        return
+      }
+      waitSeconds = Math.min(raw, MAX_WAIT_SECONDS)
+    }
+    // Optional targeted claim: only messages belonging to one conversation.
+    const matchRootId = truncateCodePoints(parsed.match_root_id, 64).trim()
+    const claim = { limit, leaseSeconds, matchRootId }
     notifyFailedSenders() // surface expired/failed requests to their senders
+    let messages = storeV2.pull(agent, Date.now() / 1000, claim)
+    if (!messages.length && waitSeconds > 0 && typeof waitFor === 'function') {
+      messages = await waitFor(agent, { ...claim, waitSeconds, res })
+    }
+    if (res.writableEnded || res.destroyed) return
     sendJson(res, 200, { messages: messages.map(v2PublicMessage) })
     return
   }
@@ -305,6 +352,7 @@ export function handleV2Routes({ config, storeV2, agent, req, res, path, rawBody
       return
     }
     console.warn(`[relay-broker] admin requeue ${messageId} by ${agent}`) // ids only, never content
+    if (typeof wakeAgent === 'function') wakeAgent(existing.target) // a requeued message must not wait for the next poll period
     sendJson(res, 200, { ok: true, message_id: messageId })
     return
   }

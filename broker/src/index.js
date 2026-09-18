@@ -64,9 +64,30 @@ server.on('error', (err) => {
   process.exit(1)
 })
 
+/**
+ * Server-side housekeeping. Runs on its own timer so expiry bookkeeping and
+ * "undelivered" notices do not depend on some agent happening to poll: with the
+ * old wiring (notify only from the pull/ack routes) a recipient that never came
+ * online produced no signal at all for its sender.
+ */
+const SWEEP_INTERVAL_MS = 60 * 1000
+const sweep = setInterval(() => {
+  try {
+    storeV2.cleanup(Date.now() / 1000)
+    server.notifyFailedSenders?.()
+  } catch (err) {
+    console.error(`[relay-broker] sweep failed: ${err.message}`)
+  }
+}, SWEEP_INTERVAL_MS)
+sweep.unref()
+
+// A held long-poll must be released before shutdown; otherwise `server.close()`
+// waits out every remaining `wait_seconds` and the process looks wedged.
 function shutdown() {
+  clearInterval(sweep)
   store.close?.()
   storeV2.close?.()
+  server.closeAllConnections?.()
   server.close(() => process.exit(0))
 }
 process.once('SIGINT', shutdown)

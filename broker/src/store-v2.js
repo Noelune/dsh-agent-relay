@@ -273,14 +273,19 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
     return messages.get(String(messageId)) ?? null
   }
 
-  function pull(target, now, { limit = 8, leaseSeconds: requestedLease } = {}) {
+  function pull(target, now, { limit = 8, leaseSeconds: requestedLease, matchRootId = '' } = {}) {
     cleanup(now)
     lastPullAt.set(target, now)
     counters.pulls += 1
     const leaseUntil = now + (requestedLease ?? leaseSecondsValue)
     const out = []
+    const wantedRoot = matchRootId ? String(matchRootId) : null
     const ready = [...messages.values()]
       .filter((m) => m.target === target && m.status === STATUS.QUEUED && m.expires_at >= now && m.attempts < maxAttemptsValue)
+      // A targeted claim lets a caller wait for one specific conversation
+      // (the synchronous `relay ask` handoff) without stealing the rest of its
+      // inbox, which stays available to a normal poller.
+      .filter((m) => (wantedRoot ? String(m.root_id) === wantedRoot : true))
       .sort((a, b) => a.created_at - b.created_at)
       .slice(0, limit)
     for (const m of ready) {

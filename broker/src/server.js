@@ -13,6 +13,8 @@ import { normalizeEnvelope } from './store.js'
 import { MAX_LEASE_SECONDS } from './config.js'
 import {
   PROTOCOL_VERSION as V2_VERSION,
+  PRESENCE_STALE_SECONDS,
+  MAX_WAIT_SECONDS,
 } from './protocol.js'
 import { createV2Store } from './store-v2.js'
 import { cryptoRandomHex, sendJson, errorBody, parseJsonObject, clampLimit, readBody } from './http-utils.js'
@@ -31,6 +33,8 @@ const BROKER_VERSION = require('../package.json').version
 const HEARTBEAT_TTL_SECONDS = 90
 
 const NOTIFY_FAILED_PREFIX = '[Relay] 你的内部协作消息未能送达'
+// Floor for how long an "undelivered" notice stays claimable (7 days).
+const NOTICE_MIN_RETENTION_SECONDS = 7 * 86400
 
 /**
  * @param {object} deps
@@ -57,6 +61,10 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
         : `原因: ${String(row.last_error || 'unknown').slice(0, 300)}`
       const body = String(row.body || '')
       const notice = `${NOTIFY_FAILED_PREFIX}：\n目标 agent: ${row.target}\n尝试次数: ${row.attempts}/${config.maxAttempts}\n${reason}\n\n原始消息（前 ${Math.min(body.length, 400)} 字）：\n${body.slice(0, 400)}`
+      // The notice must outlive the failure it reports. With the old 3600 s TTL
+      // a sender that was itself briefly away lost the *error report* silently —
+      // exactly the failure mode this notice exists to surface.
+      const noticeTtl = Math.max(NOTICE_MIN_RETENTION_SECONDS, config.messageTtlDays * 86400)
       storeV2.create({
         message_id: cryptoRandomHex(),
         root_id: row.root_id,
@@ -67,15 +75,84 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
         body: notice,
         session_ref: row.session_ref ?? '',
         created_at: now,
-        expires_at: now + 3600,
+        expires_at: now + noticeTtl,
         execution_mode: row.execution_mode || 'read',
         context: '',
         topic: row.topic || '',
       }, `undelivered:${row.message_id}`)
+      wakeAgent(row.origin)
     }
   }
 
-  return createServer(async (req, res) => {
+  /**
+   * Long-poll registry: agent -> Set of held pull requests. A message created
+   * for that agent settles the held requests immediately, which is what turns
+   * delivery latency from "up to one poll period" into "as soon as it lands".
+   */
+  const waiters = new Map()
+  const MAX_WAITERS_PER_AGENT = 16
+
+  function dropWaiter(entry) {
+    if (entry.timer) { clearTimeout(entry.timer); entry.timer = null }
+    const set = waiters.get(entry.agent)
+    if (!set) return
+    set.delete(entry)
+    if (!set.size) waiters.delete(entry.agent)
+  }
+
+  function settleWaiter(entry) {
+    if (entry.done) return
+    entry.done = true
+    let messages = []
+    try {
+      messages = storeV2.pull(entry.agent, Date.now() / 1000, entry.opts)
+    } catch (err) {
+      console.error(`[relay-broker] long-poll claim failed for ${entry.agent}: ${err.message}`)
+    }
+    dropWaiter(entry)
+    entry.resolve(messages)
+  }
+
+  function settleWaiterEmpty(entry) {
+    if (entry.done) return
+    entry.done = true
+    dropWaiter(entry)
+    entry.resolve([])
+  }
+
+  /** Wake every held puller of `agent`; each settles with its own fresh claim. */
+  function wakeAgent(agent) {
+    const set = waiters.get(agent)
+    if (!set || !set.size) return
+    for (const entry of [...set]) settleWaiter(entry)
+  }
+
+  /**
+   * Hold a pull request for up to `waitSeconds`. Resolves with whatever the
+   * claim finds — possibly empty if a competing puller won the message, in
+   * which case the client simply asks again. A disconnected client is settled
+   * on the response's `close` event so aborts cannot leak registry entries.
+   */
+  function waitFor(agent, { limit, leaseSeconds, matchRootId, waitSeconds, res }) {
+    const existing = waiters.get(agent)
+    if (existing && existing.size >= MAX_WAITERS_PER_AGENT) return Promise.resolve([])
+    return new Promise((resolve) => {
+      const entry = {
+        agent,
+        opts: { limit, leaseSeconds, matchRootId },
+        done: false,
+        timer: null,
+        resolve,
+      }
+      entry.timer = setTimeout(() => settleWaiter(entry), Math.max(1, waitSeconds) * 1000)
+      entry.timer.unref?.()
+      if (!existing) waiters.set(agent, new Set())
+      waiters.get(agent).add(entry)
+      if (res && typeof res.once === 'function') res.once('close', () => settleWaiterEmpty(entry))
+    })
+  }
+
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
     try {
@@ -103,6 +180,19 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
         const now = Math.floor(Date.now() / 1000)
         const peers = store.listPeers(now, HEARTBEAT_TTL_SECONDS).map((p) => p.agent)
         const agents = [...new Set([...peers, ...Object.keys(config.agents ?? {})])].sort()
+        const lastPullAt = storeV2.lastPullAt
+        // Presence per agent, from the only signal v2 clients actually produce:
+        // when they last claimed. (v1's /register heartbeat stays empty because
+        // no v2 client ever registers — that is why `agents` falls back to config.)
+        const presence = {}
+        for (const name of agents) {
+          const seen = lastPullAt[name] ?? null
+          presence[name] = {
+            last_pull_at: seen,
+            online: seen != null && now - seen <= PRESENCE_STALE_SECONDS,
+            age_seconds: seen == null ? null : Math.max(0, Math.round(now - seen)),
+          }
+        }
         sendJson(res, 200, {
           ok: true,
           protocol_version: V2_VERSION,
@@ -110,9 +200,11 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           version: BROKER_VERSION,
           storage: store.storage,
           signature_schemes: ['v2', 'v3'],
+          long_poll: { max_wait_seconds: MAX_WAIT_SECONDS, held: server.heldPulls() },
+          presence,
           agents,
           queues: storeV2.queueStats(agents),
-          last_pull_at: storeV2.lastPullAt,
+          last_pull_at: lastPullAt,
           counters: {
             messages_created: storeV2.counters?.messages_created ?? 0,
             pulls: storeV2.counters?.pulls ?? 0,
@@ -131,7 +223,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
 
       // ---- v2 endpoints (docs/PROTOCOL-V2.md) --------------------------
       if (v2) {
-        handleV2Routes({ config, storeV2, agent, req, res, path, rawBody, notifyFailedSenders })
+        await handleV2Routes({ config, storeV2, agent, req, res, path, rawBody, notifyFailedSenders, wakeAgent, waitFor })
         return
       }
 
@@ -355,4 +447,13 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
       sendJson(res, status, errorBody(err.code === 'bad_request' ? 'bad_request' : 'busy', err.code === 'bad_request' ? err.message : 'internal broker error'))
     }
   })
+
+  // Delivery failure notices must not depend on the dead recipient pulling:
+  // the periodic sweep in the entrypoint calls this so a sender still learns
+  // that its request went nowhere (2026-09-19 defect: notifyFailedSenders used
+  // to run only from the pull/ack routes).
+  server.notifyFailedSenders = notifyFailedSenders
+  server.wakeAgent = wakeAgent
+  server.heldPulls = () => [...waiters.values()].reduce((sum, set) => sum + set.size, 0)
+  return server
 }
