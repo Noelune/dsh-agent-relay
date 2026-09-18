@@ -8,6 +8,7 @@
  * extracted; the frozen legacy v1 routes stay inline pending deprecation.
  */
 import { createServer } from 'node:http'
+import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { normalizeEnvelope } from './store.js'
 import { MAX_LEASE_SECONDS } from './config.js'
@@ -65,7 +66,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
       // a sender that was itself briefly away lost the *error report* silently —
       // exactly the failure mode this notice exists to surface.
       const noticeTtl = Math.max(NOTICE_MIN_RETENTION_SECONDS, config.messageTtlDays * 86400)
-      storeV2.create({
+      const storedNotice = storeV2.create({
         message_id: cryptoRandomHex(),
         root_id: row.root_id,
         parent_id: row.message_id,
@@ -80,7 +81,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
         context: '',
         topic: row.topic || '',
       }, `undelivered:${row.message_id}`)
-      wakeAgent(row.origin)
+      wakeAgent(row.origin, { messageId: storedNotice.message_id, rootId: row.root_id })
     }
   }
 
@@ -120,11 +121,73 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
     entry.resolve([])
   }
 
-  /** Wake every held puller of `agent`; each settles with its own fresh claim. */
-  function wakeAgent(agent) {
+  /**
+   * Targeted push delivery. A member listed in `agents.<name>.wake_command` is
+   * started on demand when a message lands and nobody is polling for it, which
+   * is what removes the old precondition "the recipient must already be running
+   * a poller" — the 2026-09-19 audit's root cause (4 of 6 members were deaf).
+   * One in-flight wake per agent; the worker claims and exits by itself.
+   */
+  const waking = new Set()
+
+  function fillWakeTemplate(template, { messageId = '', rootId = '', agent: agentName = '' } = {}) {
+    return String(template)
+      .replace(/\{message_id\}/g, messageId)
+      .replace(/\{root_id\}/g, rootId)
+      .replace(/\{agent\}/g, agentName)
+  }
+
+  function spawnWorker(agentName, info) {
+    const entry = config.agents?.[agentName]
+    const template = entry?.wakeCommand
+    if (!template || waking.has(agentName)) return false
+    const command = fillWakeTemplate(template, { ...info, agent: agentName })
+    waking.add(agentName)
+    let child = null
+    try {
+      child = spawn(command, {
+        shell: true,
+        windowsHide: true,
+        stdio: 'ignore',
+        // The credential goes through the child's environment, never the command
+        // line: argv is readable by every process on the box, and a secret there
+        // would leak into shell history, logs and the process list.
+        env: {
+          ...process.env,
+          AGENT_RELAY_AGENT: agentName,
+          AGENT_RELAY_BROKER_URL: `http://${config.host}:${config.port}`,
+          ...(entry?.secret || config.secret ? { AGENT_RELAY_SECRET: entry?.secret || config.secret } : {}),
+        },
+      })
+    } catch (err) {
+      waking.delete(agentName)
+      console.error(`[relay-broker] wake ${agentName} failed to start: ${err.message}`)
+      return false
+    }
+    child.once('error', (err) => {
+      waking.delete(agentName)
+      console.error(`[relay-broker] wake ${agentName} error: ${err.message}`)
+    })
+    child.once('exit', (code) => {
+      waking.delete(agentName)
+      console.log(`[relay-broker] wake ${agentName} exited (code ${code})`)
+    })
+    child.unref?.()
+    // Never let a lost exit event wedge the agent permanently.
+    const guard = setTimeout(() => waking.delete(agentName), 15 * 60 * 1000)
+    guard.unref?.()
+    console.log(`[relay-broker] waking ${agentName} for message ${info.messageId ?? '?'}`) // ids only, never content
+    return true
+  }
+
+  /** Wake every held puller of `agent`, or start it on demand when none exist. */
+  function wakeAgent(agent, info = {}) {
     const set = waiters.get(agent)
-    if (!set || !set.size) return
-    for (const entry of [...set]) settleWaiter(entry)
+    if (set && set.size) {
+      for (const entry of [...set]) settleWaiter(entry)
+      return
+    }
+    spawnWorker(agent, info)
   }
 
   /**
@@ -455,5 +518,12 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
   server.notifyFailedSenders = notifyFailedSenders
   server.wakeAgent = wakeAgent
   server.heldPulls = () => [...waiters.values()].reduce((sum, set) => sum + set.size, 0)
+  /** Release every held long-poll; used by the shutdown path. */
+  server.releaseWaiters = () => {
+    for (const set of [...waiters.values()]) {
+      for (const entry of [...set]) settleWaiterEmpty(entry)
+    }
+    waiters.clear()
+  }
   return server
 }

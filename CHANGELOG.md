@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] — 2026-09-19
+
+### Added — the circle works when nobody is polling
+
+Motivated by a measured audit: 27 stored messages, 11 completed / 15 expired / 1
+failed (41% delivery), every expiry with `attempts=0`; 132,846 pulls against those
+27 messages; and only 2 of 6 members had claimed anything since the last restart.
+
+- **Presence on send.** `POST /v1/messages` now returns `target_online`,
+  `last_seen_at` and `root_id`, plus a `hint` when nobody is listening. A caller
+  learns immediately instead of an hour later.
+- **Retention, not expiry.** Default request TTL 1 h → 7 days (`ttl_seconds`
+  still overrides, clamped to 30 days). An offline peer no longer implies a lost
+  request.
+- **Long-poll wake-up.** `POST /v1/pull` accepts `wait_seconds` (broker holds the
+  request and answers the moment a message lands) and `match_root_id` (claim one
+  conversation without stealing the caller's own inbox).
+- **On-demand delivery.** `agents.<name>.wake_command` makes the broker start a
+  worker when a message lands for an agent nobody is polling, passing credentials
+  through the child environment instead of the command line.
+- **`relay_ask()`** on both clients (JS + Python): send and block for the answer,
+  short-circuiting to `peer_offline` rather than burning the deadline.
+- **MCP server** `mcp/relay-mcp.mjs` — five tools (`relay_ask`, `relay_send`,
+  `relay_inbox`, `relay_status`, `relay_agents`). Joining a host is three config
+  lines, with no resident poller and no per-host adapter.
+- **`relay doctor`** (`setup/doctor.mjs`, also `relay.mjs doctor`): one read-only
+  pass over broker liveness, who can actually receive, backlog, credential drift
+  between the broker YAML and the bot `.env`, plaintext secrets, WAL growth and
+  deployed-adapter drift.
+- **Failure notices decoupled from delivery**: `notifyFailedSenders` runs from a 60 s server-side
+  sweep (it used to fire only inside pull/ack, so a dead recipient also swallowed
+  its own error report) and the notice lives at least 7 days.
+
+### Fixed
+- `extractReplyText` survived DSH core 0.1.5-rc.2 removing `session.events`
+  (it now prefers `snapshotEvents(fromSeq)`), plus a guard against a
+  non-array/throwing accessor, both locked by contract tests.
+- Shutdown releases held long-polls instead of hanging until their deadline.
+
+### Changed
+- `/healthz` gained `presence` and `long_poll`.
+- Collaboration sessions are titled with the unified v2 convention
+  (`协作 │ <来源> │ <主题>`).
+- Tests: 136 → 154.
+
 ## [0.5.0] — 2026-08-22
 
 ### Added — v3 protocol compatibility (bilingual broker)

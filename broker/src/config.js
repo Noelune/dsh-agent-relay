@@ -159,6 +159,15 @@ function normalizeAgents(loaded, sharedSecret) {
       }
       if (!Object.keys(keys).length) throw new Error(`invalid agents.${name}.keys: must not be empty`)
     }
+    // Targeted push delivery: when a message lands for an agent that nobody is
+    // polling, the broker runs this command once (headless worker shape). This
+    // is what removes the "the recipient must be running a poller" precondition.
+    let wakeCommand = null
+    if (cfg?.wake_command !== undefined && cfg?.wake_command !== null) {
+      wakeCommand = String(cfg.wake_command).trim()
+      if (!wakeCommand) throw new Error(`invalid agents.${name}.wake_command: must not be empty`)
+      if (wakeCommand.length > 2000) throw new Error(`invalid agents.${name}.wake_command: too long`)
+    }
     // Targets are normalized to lowercase — v2 lowercases agent names and
     // targets on the wire, so config lists must match (self-use _string_list
     // also lowercases).
@@ -171,6 +180,7 @@ function normalizeAgents(loaded, sharedSecret) {
       allowedReadTargets: Array.isArray(read) ? lowerList(read) : legacy,
       allowedContinueTargets: Array.isArray(cont) ? lowerList(cont) : legacy,
       allowedWriteTargets: Array.isArray(write) ? lowerList(write) : [],
+      wakeCommand,
     }
     ownAuth.set(name, secret !== null || hasOwnKeys)
   }

@@ -85,6 +85,7 @@ sweep.unref()
 // waits out every remaining `wait_seconds` and the process looks wedged.
 function shutdown() {
   clearInterval(sweep)
+  server.releaseWaiters?.() // answer held long-polls instead of hanging the close
   store.close?.()
   storeV2.close?.()
   server.closeAllConnections?.()

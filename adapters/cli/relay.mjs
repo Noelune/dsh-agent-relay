@@ -61,6 +61,12 @@ v2 commands (wire protocol v2, docs/PROTOCOL-V2.md):
   v2 requeue <id>               admin: requeue a failed/expired/leased message
   v2 cancel <id>                admin: cancel a non-terminal message
 
+doctor                          one-pass health check: broker, who can actually
+                                receive, queue backlog, credential drift between
+                                the broker config and the .env, storage shape,
+                                deployed-adapter drift. --json / --quiet.
+                                Exit 0 ok, 2 warnings, 1 broken.
+
 Options:
   --broker <url>    broker base URL   (env DSH_RELAY_BROKER_URL, default http://127.0.0.1:19121)
   --agent <name>    this agent name   (env DSH_RELAY_AGENT)
@@ -103,6 +109,22 @@ async function main() {
     return
   }
   const command = argv[0]
+  // `doctor` is read-only and needs no identity: it inspects the broker, the
+  // queue, both credential files and the storage shape in one pass.
+  if (command === 'doctor') {
+    const { runDoctor, formatReport } = await import('../../setup/doctor.mjs')
+    const flag = (name) => {
+      const i = argv.indexOf(name)
+      return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : undefined
+    }
+    const report = await runDoctor({
+      broker: flag('--broker'), config: flag('--config'), envFile: flag('--env-file'), dataDir: flag('--data-dir'),
+    })
+    if (argv.includes('--json')) console.log(JSON.stringify(report, null, 2))
+    else console.log(formatReport(report, { quiet: argv.includes('--quiet') }))
+    process.exitCode = report.status === 'fail' ? 1 : report.status === 'warn' ? 2 : 0
+    return
+  }
   const cfg = loadConfig(argv)
   // peers/handshake are read-only and do not need an agent identity.
   const NEEDS_AGENT = new Set(['register', 'send', 'recv', 'watch', 'pull', 'ack', 'status', 'recent', 'query'])

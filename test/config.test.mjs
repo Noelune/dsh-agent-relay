@@ -71,6 +71,7 @@ test('config: accepts optional per-agent secrets alongside routing ACLs', () => 
     allowedReadTargets: ['beta'],
     allowedContinueTargets: ['beta'],
     allowedWriteTargets: [],
+    wakeCommand: null,
   })
   assert.deepEqual(config.agents.beta, {
     secret: 'beta-secret',
@@ -79,6 +80,7 @@ test('config: accepts optional per-agent secrets alongside routing ACLs', () => 
     allowedReadTargets: null,
     allowedContinueTargets: null,
     allowedWriteTargets: [],
+    wakeCommand: null,
   })
 })
 
@@ -105,4 +107,17 @@ test('config: agent target lists are lowercased (v2 matches on lowercase names)'
   }))
   assert.deepEqual(config.agents.alpha.allowedTargets, ['beta'])
   assert.deepEqual(config.agents.alpha.allowedReadTargets, ['gamma', 'beta'])
+})
+
+test('config: wake_command is carried per agent, and an empty one is rejected', () => {
+  const config = normalizeConfig(baseConfig({
+    agents: {
+      codex: { wake_command: 'node adapters/relay-agent.mjs --agent codex --once' },
+    },
+  }))
+  assert.equal(config.agents.codex.wakeCommand, 'node adapters/relay-agent.mjs --agent codex --once')
+  assert.throws(
+    () => normalizeConfig(baseConfig({ agents: { codex: { wake_command: '   ' } } })),
+    /wake_command: must not be empty/,
+  )
 })

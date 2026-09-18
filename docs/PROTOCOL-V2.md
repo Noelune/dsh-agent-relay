@@ -162,16 +162,23 @@ With `agent=test-agent`, `secret=s3cret`, `method=POST`, `path=/v1/messages`,
   "ok": true,
   "protocol_version": 3,
   "broker": "dsh-agent-relay",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "storage": "sqlite",
   "signature_schemes": ["v2", "v3"],
+  "long_poll": { "max_wait_seconds": 120, "held": 1 },
+  "presence": {
+    "dsh":    { "last_pull_at": 1789754385.1, "online": true,  "age_seconds": 9 },
+    "codex":  { "last_pull_at": null,           "online": false, "age_seconds": null }
+  },
   "agents": ["codex", "dsh", "hermes"]
 }
 ```
 
 `protocol_version` 3 reports the bilingual broker (v2 signatures accepted
 alongside v3, see §3.1). `queues` additionally includes `oldest_queued_at`
-per agent.
+per agent. `presence` is derived from real claim activity — it is the only
+liveness signal v2 clients produce, because none of them call the legacy v1
+`/register` heartbeat. `online` means "claimed within 90 s".
 
 ### `POST /v1/messages` — create a message (auth)
 
@@ -180,32 +187,55 @@ Body: a v2 envelope subset (§2). Rules:
 - `origin` must equal the authenticated agent → else `403`.
 - `kind` must be `request` or `reply` → else `400`.
 - `body` non-empty, ≤ 48 000 chars (Unicode code points), and `idempotency_key` non-empty → else `400`.
-- `ttl_seconds` clamped to `[60, 3600]` (default 3600).
+- `ttl_seconds` clamped to `[60, 2592000]` (30 days); default **604800 = 7 days**.
+  Retention must outlive the recipient being offline — the old one-hour default
+  made silent expiry the normal outcome (2026-09-19 audit: 15 of 27 stored
+  messages expired with `attempts=0`).
 - **request**: `execution_mode` must be `read|continue|write`; the target must
   be allowed by the sender's **per-mode ACL** for that mode (see §5.1). Write is
   closed by default (`allowed_write_targets` empty). A fresh `root_id` is
-  generated.
+  generated, or the caller may supply its own (that is how `ask()` later claims
+  the answer by conversation — see §3 of the MCP tools).
 - **reply**: `parent_id` is required; the parent must exist (`404` if not) and
   the reply's `(origin, target)` must match the parent's `(target, origin)`
   (`403` otherwise). `root_id`, `session_ref`, `execution_mode`, `topic` are
   inherited from the parent.
 - **Idempotency**: a repeated `(origin, idempotency_key)` returns the original
   `message_id` with `created: false`.
+- **On-demand delivery**: if the target is not currently holding a pull and it
+  has an `agents.<name>.wake_command` configured, the broker starts it once
+  (see §5.3).
 
-Response (HTTP 200):
+Response (HTTP 200) — presence is reported on every accepted send so the caller
+learns immediately whether anybody is listening, instead of an hour later:
 
 ```json
-{ "message_id": "9f2c1a...", "created": true, "protocol_version": 2 }
+{
+  "message_id": "9f2c1a...", "created": true, "root_id": "7ab4...",
+  "protocol_version": 3,
+  "target_online": false, "last_seen_at": null,
+  "hint": "目标 codex 自 未连接过 未取件，消息已留存 168 小时等待投递…"
+}
 ```
+
+`hint` is only present when the target is offline and the message is new.
 
 ### `POST /v1/pull` — lease queued messages (auth)
 
-Body: `{ "agent"?, "limit"?, "lease_seconds"? }` (agent must match the
-authenticated identity). `limit` clamps to `[1, 8]`, `lease_seconds` to
-`[15, 3600]`. Leases up to `limit` queued messages addressed to the agent
-(queued → leased, `attempts` +1) and returns their public views (no
+Body: `{ "agent"?, "limit"?, "lease_seconds"?, "wait_seconds"?, "match_root_id"? }`
+(agent must match the authenticated identity). `limit` clamps to `[1, 8]`,
+`lease_seconds` to `[15, 3600]`. Leases up to `limit` queued messages addressed
+to the agent (queued → leased, `attempts` +1) and returns their public views (no
 broker-managed `status`/`attempts`). A message is not returned again until its
 lease expires or it is acked.
+
+- `wait_seconds` (≤ 120) turns the claim into a **long-poll**: when nothing is
+  queued the broker parks the request and answers the instant a message is
+  created for this agent, instead of the client asking every couple of seconds.
+  It resolves with whatever the claim finds, so it can legitimately return an
+  empty list (a competing puller won, or the deadline passed).
+- `match_root_id` restricts the claim to one conversation, letting a caller wait
+  for a specific answer without stealing the rest of its own inbox.
 
 ### `POST /v1/ack` — acknowledge a leased message (auth)
 
@@ -273,6 +303,32 @@ acknowledged, the broker creates an `undelivered` reply back to the origin so
 the requester learns the peer never processed it. Exactly one notice per request
 (guarded by `notified_at`), idempotent via `idempotency_key: undelivered:<id>`.
 Controlled by `broker.notifyFailedToSender` (default `true`).
+
+Two properties matter, both added after the 2026-09-19 audit: the sweep runs on a
+**60 s server-side timer** (it used to run only inside `pull`/`ack`, so a recipient
+that never came online also swallowed its own error report), and the notice is
+retained for **at least 7 days** — an error report must not expire before the
+failure it describes is discoverable.
+
+### 5.3 On-demand wake (`wake_command`)
+
+Poll-based delivery assumes the recipient is running something. On a personal
+machine that assumption fails constantly: at audit time 4 of 6 circle members had
+no poller alive, so anything sent to them was doomed.
+
+A member may therefore declare `agents.<name>.wake_command`. When a message is
+created for a member that holds **no** open pull, the broker starts that command
+once:
+
+- one in-flight wake per agent (a second message while it runs does not stack);
+- placeholders `{agent}`, `{message_id}`, `{root_id}` are expanded in the command;
+- `AGENT_RELAY_AGENT`, `AGENT_RELAY_SECRET` and `AGENT_RELAY_BROKER_URL` are put
+  in the child's **environment**, never the command line — argv is visible in the
+  process list on Windows;
+- stdout/stderr are ignored; the broker logs ids only, never content.
+
+`adapters/relay-agent.mjs --once` is the reference worker: it claims what is
+queued, answers through its `--backend-cmd`, and exits when the queue is dry.
 
 ## 6. Errors
 

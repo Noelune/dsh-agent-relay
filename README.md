@@ -96,6 +96,58 @@ flowchart LR
     E --> F[自动校验自检并输出部署报告]
 ```
 
+## 🚪 推荐接入方式：MCP（Codex / Claude Code / Qoder / 任意 MCP 宿主）
+
+`mcp/relay-mcp.mjs` 是协作圈的 MCP 入口。宿主在会话启动时自己拉起它、结束时回收，
+所以**接入一个 Agent 是 3 行配置，而不是一个常驻轮询进程**。工具面只有 5 个：
+
+| 工具 | 作用 |
+|---|---|
+| `relay_ask` | 交给对方并**直接等到回答**（对方不在线时立刻返回 `peer_offline`，请求仍留存数天等自动投递） |
+| `relay_send` | 异步投递，不等 |
+| `relay_inbox` | 取别人发给我的请求（默认读完即确认） |
+| `relay_status` | 我发的请求到哪一步了 |
+| `relay_agents` | 谁在圈里、谁此刻在线、队列积压 |
+
+Codex（`~/.codex/config.toml`）与 Claude Code（`~/.claude.json`）示例：
+
+```toml
+[mcp_servers.relay]
+command = "node"
+args = ["C:/Users/<you>/review_repos/dsh-agent-relay/mcp/relay-mcp.mjs"]
+[mcp_servers.relay.env]
+AGENT_RELAY_AGENT = "codex"
+AGENT_RELAY_BROKER_URL = "http://127.0.0.1:19121"
+# 优先用 secret_ref + vault_module（DPAPI），不要把密钥写进配置：
+AGENT_RELAY_SECRET_REF = "relay_codex"
+AGENT_RELAY_VAULT_MODULE = "C:/Users/<you>/path/to/vault.py"
+```
+
+接入后一句"让 claude 审一下这个函数"就是一次 `relay_ask` 工具调用。
+
+### 让"没在跑的成员"也能被投递：`wake_command`
+
+轮询模型要求接收方一直有进程活着，这在个人机器上经常不成立。给成员在 broker 配置里
+声明 `wake_command` 后，消息落库时若它没有挂起的拉取，broker 会**按需启动一次**工作进程
+（凭据走子进程环境变量，不进命令行）：
+
+```yaml
+agents:
+  codex:
+    wake_command: node C:/Users/<you>/review_repos/dsh-agent-relay/adapters/relay-agent.mjs --once
+```
+
+### 一条命令自检
+
+```bash
+node setup/doctor.mjs          # 或 node adapters/cli/relay.mjs doctor
+```
+
+输出：broker 是否可达、**谁真的能收消息**、队列积压、两处凭据是否漂移、
+明文密钥、WAL 是否膨胀、线上 adapter 与仓库基线是否一致。退出码 0/2/1。
+
+---
+
 ### 1. DSH 自主部署指令 (推荐)
 
 在终端中安装插件后，直接让 DSH 读取任务指南 [docs/AGENT-DEPLOY.md](docs/AGENT-DEPLOY.md) 即可完成端到端自主部署：

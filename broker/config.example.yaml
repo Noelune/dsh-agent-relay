@@ -15,6 +15,11 @@ broker:
   leaseSeconds: 600        # v2 pull lease default
   maxAttempts: 3           # v2 delivery attempts before a request fails
   notifyFailedToSender: true  # send an "undelivered" reply when a request fails
+                           # Notes: an unacknowledged request is retained for
+                           # 7 days by default (it no longer dies after one hour
+                           # just because the recipient's app was closed), and
+                           # the notice above is emitted by a 60 s server-side
+                           # sweep — it does not wait for someone to poll.
 
 security:
   lockAfterFailures: 5     # consecutive auth failures before locking
@@ -34,6 +39,13 @@ security:
 #     allowed_read_targets: [beta]
 #     allowed_continue_targets: [beta]
 #     allowed_write_targets: []    # write closed unless granted
+#     # Reachable-while-offline: when a message lands for an agent nobody is
+#     # polling, the broker starts this command once (stdout/stderr ignored, one
+#     # in-flight wake per agent). Placeholders: {agent} {message_id} {root_id}.
+#     # AGENT_RELAY_AGENT / AGENT_RELAY_SECRET / AGENT_RELAY_BROKER_URL are put
+#     # in the child's environment — never on the command line, which is world-
+#     # readable in the process list.
+#     wake_command: node C:/path/to/dsh-agent-relay/adapters/relay-agent.mjs --once
 #     keys:                        # optional v3 keyring (key rotation)
 #       legacy:
 #         secret: <hex>            # same as `secret` above

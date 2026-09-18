@@ -118,7 +118,7 @@ export async function handleV2Routes({ config, storeV2, agent, req, res, path, r
       allow_shared_write: kind === 'request' ? allowSharedWrite : false,
     })
     const { message_id, created } = storeV2.create(message, idempotencyKey)
-    if (created && typeof wakeAgent === 'function') wakeAgent(target)
+    if (created && typeof wakeAgent === 'function') wakeAgent(target, { messageId: message_id, rootId: message.root_id })
     // Presence is reported on every accepted send so the caller learns *now*
     // that nobody is listening, instead of discovering it an hour later after
     // the message silently expired. The 2026-09-19 audit showed 4 of 6 circle
@@ -352,7 +352,7 @@ export async function handleV2Routes({ config, storeV2, agent, req, res, path, r
       return
     }
     console.warn(`[relay-broker] admin requeue ${messageId} by ${agent}`) // ids only, never content
-    if (typeof wakeAgent === 'function') wakeAgent(existing.target) // a requeued message must not wait for the next poll period
+    if (typeof wakeAgent === 'function') wakeAgent(existing.target, { messageId, rootId: existing.root_id }) // a requeued message must not wait for the next poll period
     sendJson(res, 200, { ok: true, message_id: messageId })
     return
   }

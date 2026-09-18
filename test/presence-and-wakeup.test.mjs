@@ -8,7 +8,7 @@
  */
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createStore } from '../broker/src/store.js'
@@ -24,13 +24,15 @@ const SHARED = 'shared-secret-value'
 const SENDER = 'presend'
 const RECEIVER = 'pereceiver'
 const GHOST = 'peghostmember'
+const WOKEN = 'pewokenmember'
 const DATA_DIR = mkdtempSync(join(tmpdir(), 'relay-presence-'))
 let server
 let port
 let v2Store
+let config
 
 before(async () => {
-  const config = {
+  config = {
     host: '127.0.0.1', port: 0, secret: SHARED, tls: false,
     rateLimitLoopback: 100000, rateLimitRemote: 100000, messageTtlDays: 7,
     persist: false, dataDir: DATA_DIR, lockAfterFailures: 5, lockMinutes: 5,
@@ -239,7 +241,6 @@ test('ask() reports peer_offline immediately rather than waiting out the deadlin
 
 test('the Python client keeps parity on the new pull and send fields', async () => {
   const { execFileSync } = await import('node:child_process')
-  const script = join(DATA_DIR, 'py-ask.mjs')
   // The Python client must expose the same presence + long-poll surface.
   const out = execFileSync(
     process.env.PYTHON || 'python',
@@ -258,5 +259,45 @@ print('parity-ok')
     { encoding: 'utf8' },
   )
   assert.match(out, /parity-ok/)
-  void script
 })
+
+/**
+ * On-demand delivery: an agent nobody is polling gets started by the broker when
+ * a message lands for it. This is what removes "the recipient must already be
+ * running" — the 2026-09-19 audit's root cause.
+ */
+test('a message for an unpolled agent starts its wake_command once', async () => {
+  const { writeFileSync } = await import('node:fs')
+  const marker = join(DATA_DIR, 'wake.marker')
+  const helper = join(DATA_DIR, 'wake-helper.mjs')
+  // Keep the command quote-free apart from the interpreter path: `shell: true`
+  // on Windows hands the string to cmd.exe, whose quoting rules are exactly the
+  // kind of thing a test must not be testing.
+  writeFileSync(helper, [
+    "import { writeFileSync } from 'node:fs'",
+    `writeFileSync(${JSON.stringify(marker)}, process.argv[2] ?? '')`,
+    'setTimeout(() => process.exit(0), 1500) // stay in flight so the dedup path is exercised',
+  ].join('\n'), 'utf8')
+  config.agents[WOKEN] = { wakeCommand: `"${process.execPath}" ${helper} {message_id}` }
+  try {
+    const res = await post(SENDER, '/v1/messages', sendArgs({ target: WOKEN, idempotencyKey: 'presence:wake-cmd' }))
+    const data = await res.json()
+    assert.equal(data.target_online, false, 'nobody is polling the woken agent')
+
+    const deadline = Date.now() + 8000
+    while (!existsSync(marker) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    assert.ok(existsSync(marker), 'the broker must start the recipient on demand')
+    assert.equal(readFileSync(marker, 'utf8'), data.message_id, 'the placeholder carries the message id')
+
+    // A second message while that wake is still in flight must not double-start.
+    rmSync(marker, { force: true })
+    await post(SENDER, '/v1/messages', sendArgs({ target: WOKEN, idempotencyKey: 'presence:wake-cmd-2' }))
+    await new Promise((r) => setTimeout(r, 500))
+    assert.equal(existsSync(marker), false, 'one in-flight wake per agent')
+  } finally {
+    delete config.agents[WOKEN]
+  }
+})
+

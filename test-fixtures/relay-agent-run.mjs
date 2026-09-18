@@ -59,12 +59,25 @@ if (reply) {
   status = await alpha.status([messageId])
 }
 
+// Stop the child *before* closing the server. Killing it mid-request leaves a
+// socket being destroyed while its held response is still pending, and the
+// forced teardown that follows trips libuv on Windows
+// (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`).
+server.releaseWaiters?.()
 agent.kill()
+await new Promise((resolve) => {
+  agent.once('close', resolve)
+  const guard = setTimeout(resolve, 5000)
+  guard.unref()
+})
+server.closeAllConnections?.()
 await new Promise((resolve) => server.close(resolve))
 
-if (!reply) { console.error('FAIL: no reply from relay-agent\n' + agentOut); process.exit(1) }
-if (!reply.body.includes('mock 后端回复')) { console.error('FAIL: unexpected reply body: ' + reply.body.slice(0, 80)); process.exit(1) }
-if (status[0]?.status !== 'completed') { console.error('FAIL: request not completed'); process.exit(1) }
-
-console.log('OK relay-agent reply + completed')
-process.exit(0)
+let failed = false
+if (!reply) { console.error('FAIL: no reply from relay-agent\n' + agentOut); failed = true }
+else if (!reply.body.includes('mock 后端回复')) { console.error('FAIL: unexpected reply body: ' + reply.body.slice(0, 80)); failed = true }
+else if (status[0]?.status !== 'completed') { console.error('FAIL: request not completed'); failed = true }
+else console.log('OK relay-agent reply + completed')
+process.exitCode = failed ? 1 : 0
+// Deliberately no process.exit(): let the event loop drain so handles close in
+// an orderly way instead of racing a forced teardown.
