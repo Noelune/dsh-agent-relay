@@ -523,7 +523,14 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   const MAINTENANCE_INTERVAL_MS = 5 * 60 * 1000
   let maintenanceTimer = null
   if (persist) {
-    maintenanceTimer = setInterval(() => { try { cleanup(Date.now() / 1000) } catch { /* best-effort */ } }, MAINTENANCE_INTERVAL_MS)
+    maintenanceTimer = setInterval(() => {
+      try { cleanup(Date.now() / 1000) } catch { /* best-effort */ }
+      // A read-heavy queue never writes, so nothing else ever flushes the WAL:
+      // 2026-09-19 found a 136 KB database carrying a 3.5 MB uncheckpointed WAL.
+      if (db) {
+        try { db.exec('PRAGMA wal_checkpoint(TRUNCATE);') } catch { /* best-effort */ }
+      }
+    }, MAINTENANCE_INTERVAL_MS)
     maintenanceTimer.unref()
   }
 
