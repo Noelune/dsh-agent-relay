@@ -143,6 +143,11 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
     if (!template || waking.has(agentName)) return false
     const command = fillWakeTemplate(template, { ...info, agent: agentName })
     waking.add(agentName)
+    // The worker must be pointed at the port we are *actually* listening on:
+    // `broker.port` is 0 under an ephemeral listen (and a reverse proxy can move
+    // it too), so reading the config here handed children `http://127.0.0.1:0`.
+    const bound = server.address()
+    const brokerUrl = `http://${bound?.address ?? config.host}:${bound?.port ?? config.port}`
     let child = null
     try {
       child = spawn(command, {
@@ -155,7 +160,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
         env: {
           ...process.env,
           AGENT_RELAY_AGENT: agentName,
-          AGENT_RELAY_BROKER_URL: `http://${config.host}:${config.port}`,
+          AGENT_RELAY_BROKER_URL: brokerUrl,
           ...(entry?.secret || config.secret ? { AGENT_RELAY_SECRET: entry?.secret || config.secret } : {}),
         },
       })
@@ -187,18 +192,20 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
    * served by a pre-0.6 client (timer polling, e.g. the Feishu bot that answers
    * for codex/claude) almost never holds a pull, so that test would spawn a
    * competing headless worker and double-handle the message. Presence over the
-   * last 90 s is the honest signal — a member that claimed recently is alive and
-   * will get the wake-up through the waiter registry or its next poll.
+   * last 90 s is the honest signal — a member that claimed recently is alive.
+   *
+   * @returns {boolean} true when a worker was started, reported back to the
+   *   sender as `will_wake` so a client knows waiting is worthwhile.
    */
   function wakeAgent(agent, info = {}) {
     const set = waiters.get(agent)
     if (set && set.size) {
       for (const entry of [...set]) settleWaiter(entry)
-      return
+      return false
     }
     const lastSeen = storeV2.lastPullAt?.[agent] ?? null
-    if (lastSeen != null && Date.now() / 1000 - lastSeen <= PRESENCE_STALE_SECONDS) return
-    spawnWorker(agent, info)
+    if (lastSeen != null && Date.now() / 1000 - lastSeen <= PRESENCE_STALE_SECONDS) return false
+    return spawnWorker(agent, info)
   }
 
   /**

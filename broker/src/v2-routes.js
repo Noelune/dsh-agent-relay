@@ -118,7 +118,9 @@ export async function handleV2Routes({ config, storeV2, agent, req, res, path, r
       allow_shared_write: kind === 'request' ? allowSharedWrite : false,
     })
     const { message_id, created } = storeV2.create(message, idempotencyKey)
-    if (created && typeof wakeAgent === 'function') wakeAgent(target, { messageId: message_id, rootId: message.root_id })
+    const willWake = created && typeof wakeAgent === 'function'
+      ? wakeAgent(target, { messageId: message_id, rootId: message.root_id }) === true
+      : false
     // Presence is reported on every accepted send so the caller learns *now*
     // that nobody is listening, instead of discovering it an hour later after
     // the message silently expired. The 2026-09-19 audit showed 4 of 6 circle
@@ -134,8 +136,13 @@ export async function handleV2Routes({ config, storeV2, agent, req, res, path, r
       protocol_version: V2_VERSION,
       target_online: targetOnline,
       last_seen_at: lastSeenAt,
+      // `will_wake` tells the caller the broker has just started the recipient,
+      // so waiting for an answer is worthwhile even though it is not polling.
+      will_wake: willWake,
       ...(targetOnline || !created ? {} : {
-        hint: `目标 ${target} 自 ${lastSeenAt ? new Date(lastSeenAt * 1000).toISOString() : '未连接过'} 未取件，消息已留存 ${Math.round(ttl / 3600)} 小时等待投递；无人处理时发起方会收到未送达通知`,
+        hint: willWake
+          ? `目标 ${target} 未在线，已按需唤醒其工作进程，回答会自动送达`
+          : `目标 ${target} 自 ${lastSeenAt ? new Date(lastSeenAt * 1000).toISOString() : '未连接过'} 未取件，消息已留存 ${Math.round(ttl / 3600)} 小时等待投递；无人处理时发起方会收到未送达通知`,
       }),
     })
     return

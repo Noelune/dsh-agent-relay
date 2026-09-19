@@ -19,7 +19,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseYamlAgents, parseEnvSecrets, compareSecrets } from './secret-io.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -194,8 +194,9 @@ export function formatReport({ checks }, { quiet = false } = {}) {
   return lines.join('\n')
 }
 
-if (process.argv[1] && import.meta.url === `file:///${resolve(process.argv[1]).replace(/\\/g, '/')}`) {
-  const flags = parseArgs(process.argv.slice(2))
+/** CLI entry, exported so importing this module never runs a live probe. */
+export async function main(argv = process.argv.slice(2)) {
+  const flags = parseArgs(argv)
   const report = await runDoctor({
     broker: flags.broker,
     config: flags.config,
@@ -204,5 +205,11 @@ if (process.argv[1] && import.meta.url === `file:///${resolve(process.argv[1]).r
   })
   if (flags.json) console.log(JSON.stringify(report, null, 2))
   else console.log(formatReport(report, { quiet: Boolean(flags.quiet) }))
-  process.exitCode = report.status === 'fail' ? 1 : report.status === 'warn' ? 2 : 0
+  return report.status === 'fail' ? 1 : report.status === 'warn' ? 2 : 0
+}
+
+// Only run when executed directly; an import must not probe the live broker or
+// set the importer's exit code.
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  process.exitCode = await main()
 }

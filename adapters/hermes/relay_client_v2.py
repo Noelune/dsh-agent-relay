@@ -236,10 +236,12 @@ class RelayClientV2:
             "message_id": str(sent["message_id"]),
             "root_id": str(sent.get("root_id") or root_id),
             "target_online": bool(sent.get("target_online", True)),
+            "will_wake": bool(sent.get("will_wake", False)),
         }
-        # Nobody is listening: answer honestly now instead of burning the
-        # deadline. The request is retained for days either way.
-        if not result["target_online"] and not wait_offline:
+        # Nobody is listening *and* nobody can be woken: answer honestly now
+        # instead of burning the deadline. The request is retained for days
+        # either way, and a woken recipient answers into the same conversation.
+        if not result["target_online"] and not result["will_wake"] and not wait_offline:
             return {
                 "ok": False, **result,
                 "reason": "peer_offline",
