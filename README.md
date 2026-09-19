@@ -112,30 +112,36 @@ flowchart LR
 Codex（`~/.codex/config.toml`）与 Claude Code（`~/.claude.json`）示例：
 
 ```toml
-[mcp_servers.relay]
+[mcp_servers.relay_codex]
 command = "node"
 args = ["C:/Users/<you>/review_repos/dsh-agent-relay/mcp/relay-mcp.mjs"]
-[mcp_servers.relay.env]
+[mcp_servers.relay_codex.env]
 AGENT_RELAY_AGENT = "codex"
 AGENT_RELAY_BROKER_URL = "http://127.0.0.1:19121"
-# 优先用 secret_ref + vault_module（DPAPI），不要把密钥写进配置：
-AGENT_RELAY_SECRET_REF = "relay_codex"
-AGENT_RELAY_VAULT_MODULE = "C:/Users/<you>/path/to/vault.py"
+# 指向部署里**已有**的 dotenv，别让宿主配置变成密钥的第二个明文副本：
+AGENT_RELAY_SECRET_ENV_FILE = "D:/path/to/bot/.env"     # 读取 AGENT_RELAY_CODEX_SECRET
+# 或者用 DPAPI 保管库：AGENT_RELAY_SECRET_REF + AGENT_RELAY_VAULT_MODULE
 ```
+
+Claude Code 同理，写进 `~/.claude.json` 顶层 `mcpServers`。凭据优先级：
+`secret` → `secret_env` → `secret_env_file` → `secret_ref`+`vault_module`。
 
 接入后一句"让 claude 审一下这个函数"就是一次 `relay_ask` 工具调用。
 
 ### 让"没在跑的成员"也能被投递：`wake_command`
 
-轮询模型要求接收方一直有进程活着，这在个人机器上经常不成立。给成员在 broker 配置里
-声明 `wake_command` 后，消息落库时若它没有挂起的拉取，broker 会**按需启动一次**工作进程
-（凭据走子进程环境变量，不进命令行）：
+轮询模型要求接收方一直有进程活着，这在个人机器上经常不成立。给成员声明 `wake_command`
+后，消息落库时若它 90 秒内没取过件，broker 会**按需启动一次**工作进程（凭据走子进程
+环境变量，不进命令行）；它**真的会跑一次该成员的 CLI 并产生 API 费用**，所以开关单独成一条
+命令，默认只预演：
 
-```yaml
-agents:
-  codex:
-    wake_command: node C:/Users/<you>/review_repos/dsh-agent-relay/adapters/relay-agent.mjs --once
+```bash
+node setup/enable-wake.mjs --agent codex            # 预演：打印将写入的行
+node setup/enable-wake.mjs --all-clients --apply    # 确认后写入（自动备份），再重启 broker
 ```
+
+唤醒是**兜底而非竞争**：成员只要 90 秒内取过件（比如它的常驻代理正在跑），broker 就不会
+另起工作进程，避免同一消息被处理两次。
 
 ### 一条命令自检
 

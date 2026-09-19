@@ -139,9 +139,9 @@ export async function runDoctor(options = {}) {
       }
       const unreachable = (health.agents ?? []).filter((name) => !presence[name]?.online && !withWake.includes(name))
       if (!withWake.length) {
-        add('on-demand', 'warn', `没有成员配置 wake_command：不在线的成员收不到消息（见 docs/AGENT-DEPLOY.md）`)
+        add('on-demand', 'warn', `没有成员配置 wake_command，不在线的成员收不到消息。开一个：node setup/enable-wake.mjs --agent <name>（先看预演，加 --apply 才写入；唤醒会真跑一次该成员的 CLI）`)
       } else if (unreachable.length) {
-        add('on-demand', 'warn', `可被唤醒：${withWake.join(', ')}｜仍无法投递：${unreachable.join(', ')}`)
+        add('on-demand', 'warn', `可被唤醒：${withWake.join(', ')}｜仍无法投递：${unreachable.join(', ')}（补：node setup/enable-wake.mjs --agent ${unreachable[0]}）`)
       } else {
         add('on-demand', 'ok', `不在线成员均可按需唤醒：${withWake.join(', ')}`)
       }
