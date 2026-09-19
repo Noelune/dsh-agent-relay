@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.0] — 2026-09-19
+
+### Removed — the v1 generation and every duplicated code path
+
+Evidence from the 2026-09-19 audit: the v1 queue table had held no message since
+2026-08-15, no live client ever called `/register`, and the v1 peer list feeding
+`/healthz` was permanently empty. Two maintained generations served nobody.
+
+- `broker/src/store.js` and the ~212 lines of inline v1 routes in `server.js`
+  (`/register`, `/peers`, `POST|GET /messages`, `/messages/:id/ack`, v1
+  pull/ack/status/recent/query). Requests without v2/v3 headers now get `400`
+  with a pointer to PROTOCOL-V2.md.
+- `broker/src/auth.js`: its rate limiting and lockout never applied to v2
+  traffic, so it was weight rather than defence.
+- `lib/client.js`, `lib/sign.js`, `adapters/hermes/relay_client.py`, the
+  untracked example Hermes plugin, `docs/PROTOCOL.md` and the five test files
+  that only covered them.
+- The JSONL persistence fallback and `persistAll()` whole-table rewrites — one
+  engine, one row per write. `node:sqlite` is required (`engines.node >= 22.13`);
+  `broker.storage` accepts only `sqlite`.
+- `clampLimit` (unused export). `adapters/hermes/deployed-adapter.py`: the
+  1,476-line copy is replaced by a hash baseline
+  (`adapters/hermes/deployed-adapter.json` + `setup/capture-adapter.mjs`), which
+  is what `relay doctor` actually needs.
+
+### Changed
+- `adapters/cli/relay.mjs` is one command set (`v2` prefix still accepted):
+  `ask` / `send` / `pull --wait` / `ack` / `status` / `recent` / `query` /
+  `requeue` / `cancel` / `health` / `doctor`, credentials resolved through
+  `--secret-env-file` or a vault entry, and exit code 3 when a peer is
+  unreachable — scripts can branch on reachability without parsing JSON.
+- `setup/selfcheck.js` exercises the v2 path (send + held claim + ack) instead of
+  v1 register/recv.
+
+**BREAKING CHANGE**: the v1 wire protocol no longer exists.
+
+Tests: 138 (was 136 before the 0.6.0 work; 177 at its peak during the
+transition, then the v1-only suites were removed with the code they covered).
+
 ## [0.6.0] — 2026-09-19
 
 ### Added — the circle works when nobody is polling
