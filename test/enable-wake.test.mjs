@@ -105,7 +105,18 @@ test('an offline member is woken by the real generated command and its answer co
     // The worker claimed with the credential the broker injected via env, and it
     // acked: nothing is left pending for this member. Queue stats are keyed by the
     // message *target*, so the request counts under codex and the reply under alpha.
-    const q = broker.storeV2.queueStats(['alpha', 'codex'])
+    //
+    // A returned answer is not yet proof that the claim settled: relay-agent
+    // posts the reply first and acks the request right after, so on a slower
+    // scheduler the ack lands a beat later. macos-latest lost that race once.
+    // Wait for the settle within a bound — a worker that never acks still fails
+    // here, just after 5 s instead of on the first read.
+    const settleBy = Date.now() + 5000
+    let q = broker.storeV2.queueStats(['alpha', 'codex'])
+    while (Date.now() < settleBy && !(q.codex.completed === 1 && q.alpha.completed === 1)) {
+      await new Promise((r) => setTimeout(r, 50))
+      q = broker.storeV2.queueStats(['alpha', 'codex'])
+    }
     assert.equal(q.codex.queued, 0)
     assert.equal(q.codex.completed, 1, 'the request was claimed and finished')
     assert.equal(q.alpha.completed, 1, 'the reply was delivered and finished')
