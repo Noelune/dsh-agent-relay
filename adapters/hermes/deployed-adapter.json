@@ -1,8 +1,8 @@
 {
   "note": "基线指纹，不是副本：用于 relay doctor 检测线上 Hermes 适配器是否偏离仓库记录。",
   "path": "AppData/Local/hermes/plugins/agent-relay/adapter.py",
-  "sha256": "708b6ca8f75b5a00e2e456d19a61e5b6a6eb2e12dc0a12929fb18fdd8f7eecbd",
-  "lines": 1504,
-  "bytes": 70853,
+  "sha256": "4cfd00b8c1cc645c6b450de89a7a789439e854ebdbec09b92422babe41bc84dc",
+  "lines": 1589,
+  "bytes": 75937,
   "captured": "2026-09-19"
 }
