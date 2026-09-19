@@ -60,10 +60,18 @@ def main() -> int:
     try:
         v3.ack(mid3, "completed", lease_token="forged")
         raise AssertionError("forged lease token must be rejected")
-    except RelayError:
-        pass
+    except RelayError as err:
+        # A caller must be able to branch on the failure without string-matching:
+        # a dead lease is 409/lease_mismatch, not an unnamed error.
+        assert err.status == 409, f"forged lease must be 409, got {err.status!r}"
+        assert err.code == "lease_mismatch", f"unexpected code {err.code!r}"
     v3.ack(mid3, "completed", lease_token=leased["lease_token"])
     assert alpha.status([mid3])[0]["status"] == "completed"
+
+    # session_ref is optional, mirroring the JS client: an omitted one must not be
+    # a TypeError on the caller's side.
+    mid4 = v3.send_request(target="beta", body="no session_ref", idempotency_key="pyv2-integration:4", ttl_seconds=600)
+    assert v3.status([mid4])[0]["message_id"] == mid4, "send without session_ref failed"
 
     print("ok: RelayClientV2 cross-language round-trip passed (v2 + v3)")
     return 0

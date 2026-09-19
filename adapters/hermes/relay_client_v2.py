@@ -46,7 +46,18 @@ MAX_WAIT_SECONDS = 120  # broker ceiling for a held long-poll
 
 
 class RelayError(RuntimeError):
-    """A protocol-level error returned by the broker."""
+    """A protocol-level error returned by the broker.
+
+    `status` and `code` carry the HTTP status and the broker's machine-readable
+    code, so a caller can branch on 403/409/401 instead of string-matching a
+    human message — the JS client already exposes this, and a caller that swaps
+    between the two should not lose it.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None, code: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
 
 
 def canonical_body(payload: dict[str, Any]) -> bytes:
@@ -99,8 +110,9 @@ class RelayClientV2:
                 parsed = json.loads(exc.read().decode("utf-8"))
             except Exception:
                 parsed = None
-            message = (parsed or {}).get("error", {}).get("message", f"relay request failed ({exc.code})")
-            raise RelayError(str(message)[:500]) from exc
+            error = (parsed or {}).get("error") or {}
+            message = error.get("message") or f"relay request failed ({exc.code})"
+            raise RelayError(str(message)[:500], status=exc.code, code=str(error.get("code") or "")) from exc
 
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/healthz", {})
@@ -110,7 +122,7 @@ class RelayClientV2:
         target: str,
         body: str,
         *,
-        session_ref: str,
+        session_ref: str = "",
         idempotency_key: str,
         ttl_seconds: int = DEFAULT_REQUEST_TTL_SECONDS,
         execution_mode: str = "read",
@@ -147,7 +159,7 @@ class RelayClientV2:
         target: str,
         body: str,
         *,
-        session_ref: str,
+        session_ref: str = "",
         idempotency_key: str,
         ttl_seconds: int = DEFAULT_REQUEST_TTL_SECONDS,
         execution_mode: str = "read",

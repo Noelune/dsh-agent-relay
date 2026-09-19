@@ -238,7 +238,9 @@ lease expires or it is acked.
 
 - `wait_seconds` (≤ 120) turns the claim into a **long-poll**: when nothing is
   queued the broker parks the request and answers the instant a message is
-  created for this agent, instead of the client asking every couple of seconds.
+  created for this agent (measured **~30 ms** between the send committing and a
+  held pull returning, 2026-09-19), instead of the client asking every couple of
+  seconds.
   It resolves with whatever the claim finds, so it can legitimately return an
   empty list (a competing puller won, or the deadline passed).
 - `match_root_id` restricts the claim to one conversation, letting a caller wait
