@@ -90,6 +90,18 @@ is world-readable in the process list), and the broker URL is the address it is
 actually bound to. Members with a claim in the last 90 s are not woken again, so a
 resident poller and an on-demand worker cannot both serve the same message.
 
+**A member whose host app is itself the poller needs no `wake_command`.** The dsh
+plugin and the deployed Hermes adapter each hold a long-poll open while their app
+is running, so they are reachable whenever the user has it open and simply queue
+up to `messageTtlDays` while it is closed — which is the intended shape: nothing
+runs when the agent is not running. `relay doctor` lists them as "not woken on
+demand", which is a statement about the closed-laptop case, not about the
+round trip. Both pollers use the broker's `wait_seconds` hold, so an idle
+member costs one signed request per hold window (Hermes: 12 s ⇒ ~7,200/day,
+configurable via its plugin's `wait_seconds`, `0` restores a fixed-cadence loop)
+rather than one every couple of seconds, and a message is picked up in
+milliseconds instead of up to a poll interval.
+
 ## 5. Verify the round trip
 
 ```sh

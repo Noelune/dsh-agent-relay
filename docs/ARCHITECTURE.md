@@ -92,7 +92,7 @@ Recorded so these do not come back as new ideas every review.
   problem that removing v1 just deleted. The measured latency that motivated the
   idea is no longer in the transport: a broker-held wake round trip is ~250 ms
   end to end and a store pull is sub-millisecond. The path that does matter —
-  a held pull being answered when a message lands — measures ~30 ms.
+  a held pull being answered when a message lands — measures 10–30 ms.
 - **Dropping the v2 signature scheme.** Deferred, not skipped. The in-repo dsh
   plugin still signs without a key id, while the deployed Hermes adapter and the
   Feishu bot already sign v3 with the implicit `legacy` key. Both schemes share

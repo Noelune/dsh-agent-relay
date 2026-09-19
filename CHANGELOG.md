@@ -16,9 +16,20 @@ than by reading the code.
 - **`session_ref` is optional in `send_request` / `send_request_detailed`,**
   matching the JS client. It was a required keyword argument, which made the
   Python client stricter than the one it is supposed to be equivalent to.
-- **Measured, not promised:** a broker-held `wait_seconds` pull returned **~30 ms**
-  after the matching send committed. The protocol doc claimed "the instant a
-  message is created"; that is now a number.
+- **Measured, not promised:** a broker-held `wait_seconds` pull returns **10–30 ms**
+  after the matching send commits (two runs: 30 ms via the CLI, 8–11 ms via the
+  Hermes loop). The protocol doc claimed "the instant a message is created";
+  that is now a number.
+- **Deployed Hermes adapter polls on a hold instead of every 2 s** (out-of-repo
+  copy at `%LOCALAPPDATA%\hermes\plugins\agent-relay\adapter.py`; the repo records
+  its new hash baseline). Its loop was the last fixed-cadence poller on this
+  machine: 43,200 signed requests/day while the gateway runs. It now holds
+  `wait_seconds=12` (plugin-configurable, `0` restores the old shape), measured on
+  the real extracted code: idle spacing exactly 12.0 s ⇒ **7,200/day (6× less)**,
+  message pickup **8–11 ms** instead of up to 2 s, and — deliberately — a read
+  timeout of 12+3 s so **quitting Hermes costs no more than it already did**.
+  Against a broker without long-poll it falls back to `poll_seconds` spacing
+  rather than spinning, which was the regression this change could have caused.
 - `docs/ARCHITECTURE.md` / `SECURITY.md` state that the routing ACL gates
   **requests only** — an answer is authorised by its parent — which is what makes
   "exclude a member" a block on starting topics, not on replying to them.
