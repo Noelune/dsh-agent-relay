@@ -66,6 +66,7 @@ export function resolveSettings(flags = {}, env = process.env, file = loadFileCo
     endpoint: str(flags.broker) ?? env.AGENT_RELAY_BROKER_URL ?? file.endpoint ?? 'http://127.0.0.1:19121',
     secret: str(flags.secret) ?? env.AGENT_RELAY_SECRET ?? file.secret ?? '',
     secretEnv: str(flags['secret-env']) ?? env.AGENT_RELAY_SECRET_ENV ?? file.secret_env ?? '',
+    secretEnvFile: str(flags['secret-env-file']) ?? env.AGENT_RELAY_SECRET_ENV_FILE ?? file.secret_env_file ?? '',
     secretRef: str(flags['secret-ref']) ?? env.AGENT_RELAY_SECRET_REF ?? file.secret_ref ?? '',
     vaultModule: str(flags['vault-module']) ?? env.AGENT_RELAY_VAULT_MODULE ?? file.vault_module ?? '',
     keyId: str(flags['key-id']) ?? env.AGENT_RELAY_KEY_ID ?? file.key_id ?? '',

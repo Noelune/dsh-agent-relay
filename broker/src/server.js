@@ -180,13 +180,24 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
     return true
   }
 
-  /** Wake every held puller of `agent`, or start it on demand when none exist. */
+  /**
+   * Wake every held puller of `agent`, or start its worker on demand.
+   *
+   * "On demand" must not mean "no request is parked right this second": a member
+   * served by a pre-0.6 client (timer polling, e.g. the Feishu bot that answers
+   * for codex/claude) almost never holds a pull, so that test would spawn a
+   * competing headless worker and double-handle the message. Presence over the
+   * last 90 s is the honest signal — a member that claimed recently is alive and
+   * will get the wake-up through the waiter registry or its next poll.
+   */
   function wakeAgent(agent, info = {}) {
     const set = waiters.get(agent)
     if (set && set.size) {
       for (const entry of [...set]) settleWaiter(entry)
       return
     }
+    const lastSeen = storeV2.lastPullAt?.[agent] ?? null
+    if (lastSeen != null && Date.now() / 1000 - lastSeen <= PRESENCE_STALE_SECONDS) return
     spawnWorker(agent, info)
   }
 

@@ -301,3 +301,33 @@ test('a message for an unpolled agent starts its wake_command once', async () =>
   }
 })
 
+/**
+ * A member served by a timer-polling pre-0.6 client (the Feishu bot answering
+ * for codex/claude) almost never holds a pull open. Spawning on "no held pull"
+ * would put a headless worker in competition with it and double-handle the
+ * message, so presence — not held requests — gates the wake.
+ */
+test('a recently-seen agent is not started on demand even when it holds no pull', async () => {
+  const { writeFileSync } = await import('node:fs')
+  const marker = join(DATA_DIR, 'wake-alive.marker')
+  const helper = join(DATA_DIR, 'wake-alive-helper.mjs')
+  writeFileSync(helper, [
+    "import { writeFileSync } from 'node:fs'",
+    `writeFileSync(${JSON.stringify(marker)}, 'spawned')`,
+  ].join('\n'), 'utf8')
+  config.agents[WOKEN] = { wakeCommand: `"${process.execPath}" ${helper}` }
+  try {
+    assert.equal(server.heldPulls(), 0, 'the woken agent holds no pull')
+    await post(WOKEN, '/v1/pull', { agent: WOKEN, limit: 1 }) // a timer poll, like the bot does
+    rmSync(marker, { force: true })
+
+    await post(SENDER, '/v1/messages', sendArgs({ target: WOKEN, idempotencyKey: 'presence:wake-suppressed' }))
+    await new Promise((r) => setTimeout(r, 600))
+    assert.equal(existsSync(marker), false, 'a live member must never be double-served')
+    // (The complementary case — an agent that never claimed does get started —
+    // is the test above.)
+  } finally {
+    delete config.agents[WOKEN]
+  }
+})
+

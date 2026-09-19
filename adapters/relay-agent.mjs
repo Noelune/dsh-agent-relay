@@ -65,6 +65,7 @@ function resolveConfig(flags) {
     // Same precedence as the DSH plugin, so a member never has to keep a secret
     // in a file: env var, then a vault entry resolved through secret_ref.
     secretEnv: str(flags['secret-env']) ?? env.AGENT_RELAY_SECRET_ENV ?? file.secret_env ?? '',
+    secretEnvFile: str(flags['secret-env-file']) ?? env.AGENT_RELAY_SECRET_ENV_FILE ?? file.secret_env_file ?? '',
     secretRef: str(flags['secret-ref']) ?? env.AGENT_RELAY_SECRET_REF ?? file.secret_ref ?? '',
     vaultModule: str(flags['vault-module']) ?? env.AGENT_RELAY_VAULT_MODULE ?? file.vault_module ?? '',
     backendCmd: str(flags['backend-cmd']) ?? env.AGENT_RELAY_BACKEND_CMD ?? file.backend_cmd ?? '',
