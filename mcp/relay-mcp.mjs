@@ -21,16 +21,15 @@
  * Configuration (lowest → highest): ~/.dsh/agent-relay.json, environment, flags.
  *   AGENT_RELAY_AGENT / AGENT_RELAY_SECRET / AGENT_RELAY_BROKER_URL
  */
-import { existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { RelayClientV2 } from '../lib/client-v2.js'
 import { resolveSecret } from '../lib/credentials.mjs'
+import { loadFileConfig, relaySettings } from '../lib/relay-config.mjs'
 import { normalizeMessage, buildInboundPrompt } from '../lib/relay-plugin-core.js'
 
 const PROTOCOL_LATEST = '2025-06-18'
-const CONFIG_FILE = join(homedir(), '.dsh', 'agent-relay.json')
 const SERVER_INFO = { name: 'agent-relay', version: readVersion() }
 
 function readVersion() {
@@ -59,26 +58,11 @@ function parseArgs(argv) {
 
 const str = (v) => (typeof v === 'string' ? v : undefined)
 
+/** Identity + credentials come from the shared resolver; only MCP adds a default. */
 export function resolveSettings(flags = {}, env = process.env, file = loadFileConfig()) {
-  const agent = (str(flags.agent) ?? env.AGENT_RELAY_AGENT ?? file.agent ?? '').toLowerCase()
   return {
-    agent,
-    endpoint: str(flags.broker) ?? env.AGENT_RELAY_BROKER_URL ?? file.endpoint ?? 'http://127.0.0.1:19121',
-    secret: str(flags.secret) ?? env.AGENT_RELAY_SECRET ?? file.secret ?? '',
-    secretEnv: str(flags['secret-env']) ?? env.AGENT_RELAY_SECRET_ENV ?? file.secret_env ?? '',
-    secretEnvFile: str(flags['secret-env-file']) ?? env.AGENT_RELAY_SECRET_ENV_FILE ?? file.secret_env_file ?? '',
-    secretRef: str(flags['secret-ref']) ?? env.AGENT_RELAY_SECRET_REF ?? file.secret_ref ?? '',
-    vaultModule: str(flags['vault-module']) ?? env.AGENT_RELAY_VAULT_MODULE ?? file.vault_module ?? '',
-    keyId: str(flags['key-id']) ?? env.AGENT_RELAY_KEY_ID ?? file.key_id ?? '',
+    ...relaySettings({ flags, env, file }),
     defaultAskSeconds: Number(str(flags['ask-timeout']) ?? env.AGENT_RELAY_ASK_TIMEOUT ?? file.ask_timeout ?? 240),
-  }
-}
-
-function loadFileConfig() {
-  try {
-    return existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) : {}
-  } catch {
-    return {}
   }
 }
 

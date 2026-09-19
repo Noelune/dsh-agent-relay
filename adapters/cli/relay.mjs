@@ -13,13 +13,15 @@
  * The v1 command set (register/recv/peers/handshake) went away with the v1
  * generation; every command here speaks docs/PROTOCOL-V2.md.
  *
- * Config sources (lowest -> highest): ~/.dsh-relay.json, environment, flags.
+ * Config sources (lowest -> highest): ~/.dsh/agent-relay.json (the deployment's
+ * own runtime config), ~/.dsh-relay.json, environment, flags. With the
+ * deployment file present nothing else is needed: `node relay.mjs v2 pull` —
+ * but note that it then speaks as that file's `agent`, so pass `--agent` to act
+ * for a different member.
  */
-import { existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import { RelayClientV2 } from '../../lib/client-v2.js'
 import { resolveSecret } from '../../lib/credentials.mjs'
+import { relaySettings } from '../../lib/relay-config.mjs'
 
 // Requests are retained for days by default so an offline peer does not imply a
 // lost handoff; --ttl overrides per call.
@@ -72,26 +74,24 @@ function flagOf(argv, name, fallback = undefined) {
 }
 
 function loadConfig(argv) {
-  const env = process.env
-  const file = join(homedir(), '.dsh-relay.json')
-  let fileCfg = {}
-  try {
-    if (existsSync(file)) fileCfg = JSON.parse(readFileSync(file, 'utf8'))
-  } catch { /* ignore malformed file */ }
-  const flag = { brokerUrl: null, agent: null, secret: null }
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--broker') flag.brokerUrl = argv[++i]
-    else if (argv[i] === '--agent') flag.agent = argv[++i]
-    else if (argv[i] === '--secret') flag.secret = argv[++i]
+  // One shared resolver for the identity/credential layer (see
+  // lib/relay-config.mjs): deployment config, personal file, env, flags.
+  const flags = {}
+  for (const name of ['broker', 'agent', 'secret', 'secret-env', 'secret-env-file', 'secret-ref', 'vault-module', 'key-id', 'python']) {
+    const value = flagOf(argv, name)
+    if (value !== undefined) flags[name] = value
   }
+  const cfg = relaySettings({ flags })
   return {
-    brokerUrl: flag.brokerUrl ?? env.DSH_RELAY_BROKER_URL ?? fileCfg.brokerUrl ?? 'http://127.0.0.1:19121',
-    agent: flag.agent ?? env.DSH_RELAY_AGENT ?? fileCfg.agent ?? null,
-    secret: flag.secret ?? env.DSH_RELAY_SECRET ?? fileCfg.secret ?? '',
-    secretEnv: env.DSH_RELAY_SECRET_ENV ?? fileCfg.secret_env ?? '',
-    secretEnvFile: flagOf(argv, 'secret-env-file') ?? env.DSH_RELAY_SECRET_ENV_FILE ?? fileCfg.secret_env_file ?? '',
-    secretRef: env.DSH_RELAY_SECRET_REF ?? fileCfg.secret_ref ?? '',
-    vaultModule: env.DSH_RELAY_VAULT_MODULE ?? fileCfg.vault_module ?? '',
+    brokerUrl: cfg.endpoint,
+    agent: cfg.agent || null,
+    secret: cfg.secret,
+    secretEnv: cfg.secretEnv,
+    secretEnvFile: cfg.secretEnvFile,
+    secretRef: cfg.secretRef,
+    vaultModule: cfg.vaultModule,
+    keyId: cfg.keyId,
+    python: cfg.python,
     json: argv.includes('--json'),
   }
 }
@@ -133,7 +133,7 @@ async function main() {
 
   // ---- v2/v3 wire protocol ----
   if (command === 'v2') {
-    const v2 = new RelayClientV2({ endpoint: cfg.brokerUrl, agent: cfg.agent, secret: cfg.secret })
+    const v2 = new RelayClientV2({ endpoint: cfg.brokerUrl, agent: cfg.agent, secret: cfg.secret, keyId: cfg.keyId })
     const sub = argv[1]
     const flag = (name, fallback) => flagOf(argv, name.replace(/^--/, ''), fallback)
     try {

@@ -8,6 +8,8 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -33,6 +35,22 @@ async function withMockBroker(handler, run) {
 function runCli(args, brokerUrl) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, [cliPath, 'v2', ...args, '--broker', brokerUrl, '--agent', 'cli-test', '--secret', SECRET, '--json'])
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk })
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk })
+    child.on('error', rejectPromise)
+    child.on('close', (status) => resolvePromise({ status, stdout, stderr }))
+  })
+}
+
+/** Run with no identity flags at all, against a HOME that holds the config files. */
+function runBareCli(args, home, extra = []) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const env = { ...process.env, HOME: home, USERPROFILE: home }
+    // Unset, not empty: an empty string would win over the config file lookup.
+    for (const key of ['DSH_RELAY_BROKER_URL', 'DSH_RELAY_AGENT', 'DSH_RELAY_SECRET', 'DSH_RELAY_SECRET_ENV', 'DSH_RELAY_SECRET_ENV_FILE', 'DSH_RELAY_SECRET_REF', 'DSH_RELAY_VAULT_MODULE', 'DSH_RELAY_KEY_ID']) delete env[key]
+    const child = spawn(process.execPath, [cliPath, 'v2', ...args, ...extra, '--json'], { env })
     let stdout = ''
     let stderr = ''
     child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk })
@@ -164,4 +182,37 @@ test('doctor needs no identity and still reports a broken broker', async () => {
   const status = await new Promise((resolvePromise) => child.once('close', resolvePromise))
   assert.equal(status, 1, stdout)
   assert.match(stdout, /broker\s+.*不可达/)
+})
+
+test('a bare `relay v2 recent` speaks as its deployment config, no flags needed', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'relay-clihome-'))
+  const seen = []
+  try {
+    await withMockBroker((req, res) => {
+      seen.push({ agent: req.headers['x-agent-relay-agent'], keyId: req.headers['x-agent-relay-key-id'] })
+      json(res, { messages: [] })
+    }, async (brokerUrl) => {
+      mkdirSync(join(home, '.dsh'), { recursive: true })
+      // The file every member already has: endpoint, own agent name, a key id,
+      // and no credential value (a real one names a vault entry instead).
+      writeFileSync(join(home, '.dsh', 'agent-relay.json'), JSON.stringify({
+        endpoint: brokerUrl, agent: 'from-deployment', secret: SECRET, keyId: 'legacy',
+      }))
+      const bare = await runBareCli(['recent'], home)
+      assert.equal(bare.status, 0, bare.stderr)
+      assert.equal(seen.length, 1, 'the endpoint came from the config file, not the default')
+      assert.equal(seen[0].agent, 'from-deployment')
+      assert.equal(seen[0].keyId, 'legacy', 'keyId in the config switches the CLI to v3 signatures')
+
+      // A personal file overrides the deployment one, and a flag overrides both.
+      writeFileSync(join(home, '.dsh-relay.json'), JSON.stringify({ agent: 'personal' }))
+      assert.equal((await runBareCli(['recent'], home)).status, 0)
+      assert.equal(seen[1].agent, 'personal')
+
+      assert.equal((await runBareCli(['recent'], home, ['--agent', 'flagged'])).status, 0)
+      assert.equal(seen[2].agent, 'flagged')
+    })
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })

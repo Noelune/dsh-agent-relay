@@ -42,7 +42,6 @@ const STATUS = {
 }
 const RETENTION_SECONDS = 30 * 86400
 const RECENT_WINDOW_SECONDS = 7 * 86400
-const MAINTENANCE_INTERVAL_MS = 5 * 60 * 1000
 
 const COLUMNS = `message_id, root_id, parent_id, origin, target, kind, body, session_ref,
   execution_mode, allow_shared_write, context, topic, idempotency_key, status, attempts,
@@ -453,24 +452,23 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   }
 
   function close() {
-    if (maintenanceTimer) { clearInterval(maintenanceTimer); maintenanceTimer = null }
     if (persist) {
-      // A read-heavy queue never writes, so nothing else flushes the WAL:
-      // 2026-09-19 found a 136 KB database carrying a 3.5 MB uncheckpointed WAL.
+      // Fold the WAL back into the database on a clean stop. Long runs are
+      // covered by SQLite's own auto-checkpoint (1,000 pages); the incident this
+      // guards against was a 136 KB database carrying a 3.5 MB WAL because the
+      // process had been killed without ever checkpointing.
       try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch { /* best-effort */ }
     }
     try { db.close() } catch { /* already closed */ }
   }
 
-  // Housekeeping runs on a timer too, so a queue nobody polls still expires.
-  let maintenanceTimer = null
-  if (persist) {
-    maintenanceTimer = setInterval(() => {
-      try { cleanup(Date.now() / 1000) } catch { /* best-effort */ }
-    }, MAINTENANCE_INTERVAL_MS)
-    maintenanceTimer.unref()
-  }
-
+  // No housekeeping timer lives here on purpose: `broker/src/index.js` sweeps
+  // every 60 s, and it has to, because expiry also produces the "undelivered"
+  // notices the store cannot send by itself — a second scheduler here would just
+  // be another place holding the same rule. A message that expires while nobody
+  // pulls reads as `queued` until that sweep runs; the claim path re-checks
+  // `expires_at`, so it can never be delivered after its deadline, only marked
+  // expired a little late.
   cleanup(Date.now() / 1000)
 
   return {

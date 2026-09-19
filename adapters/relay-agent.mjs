@@ -19,16 +19,15 @@
  * Config sources (lowest → highest): ~/.dsh/agent-relay.json, env, flags.
  */
 import { homedir } from 'node:os'
-import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { RelayClientV2 } from '../lib/client-v2.js'
 import { resolveSecret } from '../lib/credentials.mjs'
+import { loadFileConfig, relaySettings } from '../lib/relay-config.mjs'
 import { normalizeMessage, buildInboundPrompt } from '../lib/relay-plugin-core.js'
 import { prepareRelayWorkspace, relayWorkspaceNote } from '../lib/workspace.js'
 import { WorkspaceLease } from '../lib/lease.js'
 
-const CONFIG_FILE = join(homedir(), '.dsh', 'agent-relay.json')
 const LOCK_ROOT = join(homedir(), '.dsh', 'workspace-locks')
 const WORKTREE_PARENT = join(homedir(), '.dsh', 'relay-worktrees')
 
@@ -55,19 +54,21 @@ function str(value) {
 }
 
 function resolveConfig(flags) {
-  let file = {}
-  try { if (existsSync(CONFIG_FILE)) file = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) } catch { /* ignore */ }
   const env = process.env
+  const file = loadFileConfig()
+  // Identity and credentials follow the same rules as the CLI and the MCP
+  // server (lib/relay-config.mjs); only the worker's own knobs are resolved here.
+  const relay = relaySettings({ flags, env, file })
   return {
-    agent: (str(flags.agent) ?? env.AGENT_RELAY_AGENT ?? file.agent ?? '').toLowerCase(),
-    broker: str(flags.broker) ?? env.AGENT_RELAY_BROKER_URL ?? file.endpoint ?? 'http://127.0.0.1:19121',
-    secret: str(flags.secret) ?? env.AGENT_RELAY_SECRET ?? file.secret ?? '',
-    // Same precedence as the DSH plugin, so a member never has to keep a secret
-    // in a file: env var, then a vault entry resolved through secret_ref.
-    secretEnv: str(flags['secret-env']) ?? env.AGENT_RELAY_SECRET_ENV ?? file.secret_env ?? '',
-    secretEnvFile: str(flags['secret-env-file']) ?? env.AGENT_RELAY_SECRET_ENV_FILE ?? file.secret_env_file ?? '',
-    secretRef: str(flags['secret-ref']) ?? env.AGENT_RELAY_SECRET_REF ?? file.secret_ref ?? '',
-    vaultModule: str(flags['vault-module']) ?? env.AGENT_RELAY_VAULT_MODULE ?? file.vault_module ?? '',
+    agent: relay.agent,
+    broker: relay.endpoint,
+    secret: relay.secret,
+    secretEnv: relay.secretEnv,
+    secretEnvFile: relay.secretEnvFile,
+    secretRef: relay.secretRef,
+    vaultModule: relay.vaultModule,
+    keyId: relay.keyId,
+    python: relay.python,
     backendCmd: str(flags['backend-cmd']) ?? env.AGENT_RELAY_BACKEND_CMD ?? file.backend_cmd ?? '',
     cwd: str(flags.cwd) ?? env.AGENT_RELAY_CWD ?? file.cwd ?? process.cwd(),
     worktreeParent: str(flags['worktree-parent']) ?? env.AGENT_RELAY_WORKTREE_PARENT ?? file.worktree_parent ?? WORKTREE_PARENT,
@@ -153,7 +154,7 @@ async function main() {
   if (!cfg.secret) cfg.secret = await resolveSecret(cfg)
   if (!cfg.secret) throw new Error('missing credential: pass --secret, set AGENT_RELAY_SECRET, or point secret_ref + vault_module at a DPAPI vault entry')
   if (!cfg.backendCmd) throw new Error('missing --backend-cmd (or AGENT_RELAY_BACKEND_CMD)')
-  const client = new RelayClientV2({ endpoint: cfg.broker, agent: cfg.agent, secret: cfg.secret })
+  const client = new RelayClientV2({ endpoint: cfg.broker, agent: cfg.agent, secret: cfg.secret, keyId: cfg.keyId })
   const health = await client.health()
   console.error(`[relay-agent] ${cfg.agent} joined circle (protocol v${health.protocol_version}); backend: ${cfg.backendCmd}${cfg.once ? ' [once]' : ''}`)
 
