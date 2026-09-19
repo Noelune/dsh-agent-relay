@@ -13,10 +13,9 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
+import { startBroker } from './helpers/broker.mjs'
 import { fileURLToPath } from 'node:url'
 import { loadConfig, normalizeConfig } from '../broker/src/config.js'
-import { createBrokerServer } from '../broker/src/server.js'
-import { createV2Store } from '../broker/src/store-v2.js'
 import { RelayClientV2 } from '../lib/client-v2.js'
 import { wakeCommandFor, planWakeConfig } from '../setup/enable-wake.mjs'
 
@@ -36,18 +35,9 @@ function stubBackend(dir, name) {
   return file
 }
 
-async function bootBroker(dir, agentsConfig) {
-  const config = {
-    host: '127.0.0.1', port: 0, secret: SECRET, tls: false,
-    rateLimitLoopback: 1e6, rateLimitRemote: 1e6, messageTtlDays: 7,
-    persist: false, dataDir: dir, lockAfterFailures: 5, lockMinutes: 5,
-    leaseSeconds: 600, maxAttempts: 3, notifyFailedToSender: true,
-    agents: agentsConfig,
-  }
-  const storeV2 = createV2Store({ dataDir: dir, persist: false, leaseSeconds: 600, maxAttempts: 3 })
-  const server = createBrokerServer({ config, storeV2 })
-  await new Promise((r) => server.listen(0, '127.0.0.1', r))
-  return { server, storeV2, port: server.address().port, config }
+const bootBroker = async (dir, agentsConfig) => {
+  const fx = await startBroker({ agents: agentsConfig, dataDir: dir, secret: SECRET })
+  return { server: fx.server, storeV2: fx.store, port: fx.port, config: fx.config }
 }
 
 test('the generated wake_command survives the broker YAML parser verbatim', () => {

@@ -7,31 +7,17 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createBrokerServer } from '../broker/src/server.js'
-import { createV2Store } from '../broker/src/store-v2.js'
+import { startBroker, TEST_SECRET } from './helpers/broker.mjs'
 import { runDoctor, formatReport } from '../setup/doctor.mjs'
 
-const SECRET = 'doctor-secret'
+const SECRET = TEST_SECRET
 
-async function withBroker(agents, fn) {
-  const dir = mkdtempSync(join(tmpdir(), 'relay-doctor-'))
-  const config = {
-    host: '127.0.0.1', port: 0, secret: SECRET, tls: false,
-    rateLimitLoopback: 1e6, rateLimitRemote: 1e6, messageTtlDays: 7,
-    persist: false, dataDir: dir, lockAfterFailures: 5, lockMinutes: 5,
-    leaseSeconds: 600, maxAttempts: 3, notifyFailedToSender: true, agents,
-  }
-  const storeV2 = createV2Store({ dataDir: dir, persist: false, leaseSeconds: 600, maxAttempts: 3 })
-  const server = createBrokerServer({ config, storeV2 })
-  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+const withBroker = async (agents, fn) => {
+  const fx = await startBroker({ agents })
   try {
-    return await fn({ port: server.address().port, dir, storeV2 })
+    return await fn({ port: fx.port, dir: fx.dir, storeV2: fx.store })
   } finally {
-    server.releaseWaiters?.()
-    server.closeAllConnections?.()
-    await new Promise((r) => server.close(r))
-    storeV2.close()
-    rmSync(dir, { recursive: true, force: true })
+    await fx.stop()
   }
 }
 
