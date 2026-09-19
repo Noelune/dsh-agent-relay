@@ -80,7 +80,11 @@ Explicitly **not** in place, so nobody mistakes a config key for a control:
 - Retention: an unclaimed request lives `broker.messageTtlDays` (7 days by
   default, `ttl_seconds` clamped to 60 s … 30 days); terminal rows are purged
   after 30 days, and with them their idempotency entry.
-- No content logging: the broker logs ids and outcomes, never bodies. The dsh
+- No content logging: the broker logs ids and outcomes, never bodies. Since 0.8.1 it
+  also keeps a bounded diagnostic — one collapsed line, max 200 characters, of a
+  woken worker's **stderr** when it exits non-zero — because `exited (code 1)` with
+  no reason is undebuggable. Worker *stdout* is never captured (it carries reply
+  text), so no message body reaches a broker log. The dsh
   plugin keeps an in-memory id-level history; the CLI prints only what you ask.
 - Constant-time signature comparison (`timingSafeEqual`).
 

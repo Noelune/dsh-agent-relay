@@ -76,7 +76,9 @@ owns only the shape of the system.
    `agent\n[keyId\n]ts\nMETHOD\npath\nsha256hex(body)`; skew beyond 300 s is
    rejected, comparison is constant-time. There is deliberately no rate limiter
    or auth-failure lockout — see [SECURITY.md](SECURITY.md).
-8. **No content logging.** The broker logs ids and outcomes, never bodies.
+8. **No content logging.** The broker logs ids and outcomes, never bodies; the one
+   exception is a bounded worker-stderr tail on a failed wake, so a delivery that
+   died is diagnosable (see [SECURITY.md](SECURITY.md)).
 
 ## Assessed and not done
 

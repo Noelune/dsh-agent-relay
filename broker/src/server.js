@@ -144,7 +144,12 @@ export function createBrokerServer({ config, storeV2 = createV2Store({ dataDir: 
       child = spawn(command, {
         shell: true,
         windowsHide: true,
-        stdio: 'ignore',
+        // stdout stays ignored — a worker's output is the reply it posts to the
+        // broker, not log material. stderr is captured (bounded below) because a
+        // wake that exits non-zero is otherwise unexplainable: the operator sees
+        // `exited (code 1)` and nothing else, which is the same silent-failure
+        // shape this whole redesign set out to remove.
+        stdio: ['ignore', 'ignore', 'pipe'],
         // The credential goes through the child's environment, never the command
         // line: argv is readable by every process on the box, and a secret there
         // would leak into shell history, logs and the process list.
@@ -160,13 +165,26 @@ export function createBrokerServer({ config, storeV2 = createV2Store({ dataDir: 
       console.error(`[relay-broker] wake ${agentName} failed to start: ${err.message}`)
       return false
     }
+    // Keep only the tail, on one line: this must not become a message-content
+    // sink, and an unpiped stderr would eventually block the child.
+    let stderrTail = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-600)
+    })
+    const tail = () => stderrTail.replace(/\s+/g, ' ').trim().slice(-200)
     child.once('error', (err) => {
       waking.delete(agentName)
       console.error(`[relay-broker] wake ${agentName} error: ${err.message}`)
     })
     child.once('exit', (code) => {
       waking.delete(agentName)
-      console.log(`[relay-broker] wake ${agentName} exited (code ${code})`)
+      if (code && code !== 0) {
+        const why = tail()
+        console.error(`[relay-broker] wake ${agentName} exited (code ${code})${why ? `: ${why}` : ''}`)
+      } else {
+        console.log(`[relay-broker] wake ${agentName} exited (code ${code})`)
+      }
     })
     child.unref?.()
     // Never let a lost exit event wedge the agent permanently.
