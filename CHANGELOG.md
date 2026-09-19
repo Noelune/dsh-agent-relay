@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed — the store has one truth now
+
+`broker/src/store-v2.js` kept an in-memory `Map` as its working copy and mirrored
+every transition into `relay_v2_messages`. That is two answers to "what is the
+state of this message", and they disagree after any crash between a Map write and
+its mirror write — the classic shape of a "the queue says leased but the file says
+queued" bug. SQLite now holds the state, and the process holds none of it:
+
+- Claims are one atomic statement (`UPDATE … WHERE message_id = (SELECT … LIMIT 1)
+  RETURNING *`), so a pull cannot observe a half-updated row.
+- Housekeeping is four set-based statements instead of a loop over every message.
+- `statusFor` / `recentFor` / `queryMessages` / `stuckFor` / `queueStats` /
+  `getFailedToNotify` read the table, so an admin view and a poller can no longer
+  disagree.
+- `persist: false` selects `:memory:` rather than a second code path: tests now run
+  the same SQL as production. Only presence (`lastPullAt`) and the counters stay in
+  memory, and they are metrics, not message state.
+- The claim index became `(target, status, created_at)`. The old
+  `(target, status, expires_at, created_at)` put a range test ahead of `created_at`,
+  so every claim re-sorted all ready rows; the new shape walks the index in delivery
+  order. Old databases drop `idx_v2_ready` on first open.
+- A pull commits once instead of once per statement (measured on a 3,000-row queue
+  pulling 8 messages: **16 ms → 3 ms**; at a realistic 300 rows: **2.2 ms → 0.4 ms**).
+  `synchronous` deliberately stays at SQLite's FULL default — the win came from
+  batching, and a durable queue should not buy speed by dropping fsyncs.
+
+New `test/store-v2-sqlite.test.mjs` (5 tests) pins the invariant with a *second*
+database connection: state an outside writer puts in the table is exactly what the
+store reports, which cannot be asserted while a `Map` sits in the middle.
+Suite: 139 → 144 passing.
+
 ## [0.7.0] — 2026-09-19
 
 ### Removed — the v1 generation and every duplicated code path
