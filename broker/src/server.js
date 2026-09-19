@@ -1,37 +1,30 @@
 /**
- * HTTP server implementing the dsh-agent-relay wire protocol.
- * See docs/PROTOCOL.md (v1) and docs/PROTOCOL-V2.md (v2) — this file is the
- * reference implementation.
- *
- * 2026-08-29 split: http-utils.js (HTTP helpers), v2-auth.js (v2/v3
- * verification + ACLs) and v2-routes.js (the active v2 protocol) are
- * extracted; the frozen legacy v1 routes stay inline pending deprecation.
+ * HTTP server for the dsh-agent-relay wire protocol (v2/v3).
+ * docs/PROTOCOL-V2.md is the contract; this file is the reference
+ * implementation and owns liveness, delivery wake-ups and the long-poll
+ * registry, while `v2-routes.js` owns the message endpoints and `v2-auth.js`
+ * the signature schemes and ACLs. The v1 generation was removed on 2026-09-19.
  */
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { normalizeEnvelope } from './store.js'
-import { MAX_LEASE_SECONDS } from './config.js'
 import {
   PROTOCOL_VERSION as V2_VERSION,
   PRESENCE_STALE_SECONDS,
   MAX_WAIT_SECONDS,
 } from './protocol.js'
 import { createV2Store } from './store-v2.js'
-import { cryptoRandomHex, sendJson, errorBody, parseJsonObject, clampLimit, readBody } from './http-utils.js'
-import { canSend, isV2Request, verifyV2Request } from './v2-auth.js'
+import { cryptoRandomHex, sendJson, errorBody, readBody } from './http-utils.js'
+import { isV2Request, verifyV2Request } from './v2-auth.js'
 import { handleV2Routes } from './v2-routes.js'
-import { randomUUID } from 'node:crypto'
 
 const require = createRequire(import.meta.url)
 
-const PROTOCOL_VERSION = '1.0'
 const BROKER_NAME = 'dsh-agent-relay'
 // Read the broker's own manifest so the path works in both the repo
 // (broker/package.json) and the Docker image (/app/package.json) — never
 // hard-code a version here.
 const BROKER_VERSION = require('../package.json').version
-const HEARTBEAT_TTL_SECONDS = 90
 
 const NOTIFY_FAILED_PREFIX = '[Relay] 你的内部协作消息未能送达'
 // Floor for how long an "undelivered" notice stays claimable (7 days).
@@ -40,13 +33,11 @@ const NOTICE_MIN_RETENTION_SECONDS = 7 * 86400
 /**
  * @param {object} deps
  * @param {object} deps.config - normalized broker config
- * @param {object} deps.store - message store
- * @param {object} deps.auth - authenticator
- * @param {object} [deps.storeV2] - v2 message store. The broker entrypoint
- *   passes one with dataDir resolved against the broker directory; the
- *   default here is a convenience for tests and standalone use.
+ * @param {object} [deps.storeV2] - message store. The entrypoint passes one with
+ *   `dataDir` resolved against the broker directory; the default here exists for
+ *   tests and standalone use.
  */
-export function createBrokerServer({ config, store, auth, storeV2 = createV2Store({ dataDir: config.dataDir, persist: config.persist, leaseSeconds: config.leaseSeconds, maxAttempts: config.maxAttempts }) }) {
+export function createBrokerServer({ config, storeV2 = createV2Store({ dataDir: config.dataDir, persist: config.persist, leaseSeconds: config.leaseSeconds, maxAttempts: config.maxAttempts }) }) {
   /**
    * When a request exhausts its attempts or expires, send an "undelivered"
    * reply back to the origin so the requester learns the peer never processed
@@ -239,32 +230,15 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
     try {
       const rawBody = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await readBody(req) : ''
 
-      // Version negotiation and liveness need no auth.
-      if (req.method === 'GET' && path === '/') {
-        sendJson(res, 200, {
-          protocol: PROTOCOL_VERSION,
-          broker: BROKER_NAME,
-          version: BROKER_VERSION,
-          capabilities: {
-            leaseDelivery: true,
-            requestReply: true,
-            filteredQuery: true,
-            sqlitePersistence: store.sqliteSupported,
-          },
-          storage: store.storage,
-        })
-        return
-      }
-
-      // Public liveness + protocol metadata (v2). No auth.
+      // Liveness + protocol metadata. No auth.
       if (req.method === 'GET' && path === '/healthz') {
         const now = Math.floor(Date.now() / 1000)
-        const peers = store.listPeers(now, HEARTBEAT_TTL_SECONDS).map((p) => p.agent)
-        const agents = [...new Set([...peers, ...Object.keys(config.agents ?? {})])].sort()
+        // Membership comes from the config: the only liveness signal clients
+        // actually produce is when they last claimed (see `presence`), and the
+        // v1 `/register` heartbeat that used to contribute here was never called
+        // by any v2/v3 client.
+        const agents = Object.keys(config.agents ?? {}).sort()
         const lastPullAt = storeV2.lastPullAt
-        // Presence per agent, from the only signal v2 clients actually produce:
-        // when they last claimed. (v1's /register heartbeat stays empty because
-        // no v2 client ever registers — that is why `agents` falls back to config.)
         const presence = {}
         for (const name of agents) {
           const seen = lastPullAt[name] ?? null
@@ -279,7 +253,7 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
           protocol_version: V2_VERSION,
           broker: BROKER_NAME,
           version: BROKER_VERSION,
-          storage: store.storage,
+          storage: 'sqlite',
           signature_schemes: ['v2', 'v3'],
           long_poll: { max_wait_seconds: MAX_WAIT_SECONDS, held: server.heldPulls() },
           presence,
@@ -294,233 +268,20 @@ export function createBrokerServer({ config, store, auth, storeV2 = createV2Stor
         return
       }
 
-      const v2 = isV2Request(req)
-      const verdict = v2 ? verifyV2Request(req, rawBody, config) : auth.check(req, rawBody)
+      // Only the v2/v3 wire protocol is served. The v1 generation was removed
+      // once the 2026-09-19 audit showed the relay database had not held a
+      // single v1 message since 2026-08-15.
+      if (!isV2Request(req)) {
+        sendJson(res, 400, errorBody('bad_request', 'missing X-Agent-Relay-* headers — the v1 protocol was removed; see docs/PROTOCOL-V2.md'))
+        return
+      }
+      const verdict = verifyV2Request(req, rawBody, config)
       if (!verdict.ok) {
         sendJson(res, verdict.status, errorBody(verdict.code, verdict.message))
         return
       }
       const agent = verdict.agent
-
-      // ---- v2 endpoints (docs/PROTOCOL-V2.md) --------------------------
-      if (v2) {
-        await handleV2Routes({ config, storeV2, agent, req, res, path, rawBody, notifyFailedSenders, wakeAgent, waitFor })
-        return
-      }
-
-      if (req.method === 'POST' && path === '/register') {
-        let parsed
-        try {
-          parsed = JSON.parse(rawBody || '{}')
-        } catch {
-          sendJson(res, 400, errorBody('bad_request', 'invalid JSON body'))
-          return
-        }
-        if (parsed.agent !== undefined && parsed.agent !== agent) {
-          sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
-          return
-        }
-        const now = Math.floor(Date.now() / 1000)
-        store.registerAgent(agent, now)
-        sendJson(res, 200, { ok: true, agent, ts: now })
-        return
-      }
-
-      if (req.method === 'GET' && path === '/peers') {
-        const now = Math.floor(Date.now() / 1000)
-        sendJson(res, 200, { peers: store.listPeers(now, HEARTBEAT_TTL_SECONDS) })
-        return
-      }
-
-      if (req.method === 'POST' && path === '/messages') {
-        let parsed
-        try {
-          parsed = JSON.parse(rawBody)
-        } catch {
-          sendJson(res, 400, errorBody('bad_request', 'invalid JSON body'))
-          return
-        }
-        let msg
-        try {
-          msg = normalizeEnvelope(parsed, agent, new Date().toISOString())
-        } catch (err) {
-          sendJson(res, 400, errorBody(err.code ?? 'bad_request', err.message))
-          return
-        }
-        if (msg.from !== agent) {
-          sendJson(res, 400, errorBody('bad_request', 'envelope.from must match X-Relay-Agent header'))
-          return
-        }
-        if (msg.to === agent) {
-          sendJson(res, 400, errorBody('bad_request', 'cannot send a message to yourself'))
-          return
-        }
-        if (!canSend(config, agent, msg.to)) {
-          sendJson(res, 403, errorBody('forbidden', `agent "${agent}" is not allowed to send to "${msg.to}"`))
-          return
-        }
-        const now = Math.floor(Date.now() / 1000)
-        const targetKnown = store.listPeers(now, HEARTBEAT_TTL_SECONDS).some((p) => p.agent === msg.to)
-        if (!targetKnown) {
-          sendJson(res, 404, errorBody('no_such_agent', `recipient "${msg.to}" has never registered`))
-          return
-        }
-        const result = store.add(msg)
-        if (!result.added) {
-          sendJson(res, 200, { accepted: true, id: msg.id, duplicate: true })
-          return
-        }
-        sendJson(res, 201, { accepted: true, id: msg.id, duplicate: false })
-        return
-      }
-
-      if (req.method === 'GET' && path === '/messages') {
-        const since = url.searchParams.get('since') ?? null
-        const limitRaw = Number(url.searchParams.get('limit') ?? 50)
-        const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(1, Math.floor(limitRaw)), 200) : 50
-        const { messages, cursor } = store.getSince(agent, since, limit)
-        sendJson(res, 200, { messages, cursor })
-        return
-      }
-
-      // ---- v1.1 lease-based delivery endpoints ----
-
-      if (req.method === 'POST' && path === '/v1/pull') {
-        const parsed = parseJsonObject(rawBody)
-        if (!parsed) {
-          sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
-          return
-        }
-        if (parsed.agent !== undefined && parsed.agent !== agent) {
-          sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
-          return
-        }
-        const limit = clampLimit(parsed.limit)
-        const requestedLease = parsed.leaseSeconds === undefined ? config.leaseSeconds : parsed.leaseSeconds
-        const leaseSeconds = Number(requestedLease)
-        if (!Number.isInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > MAX_LEASE_SECONDS) {
-          sendJson(res, 400, errorBody('bad_request', `leaseSeconds must be an integer from 1 to ${MAX_LEASE_SECONDS}`))
-          return
-        }
-        const messages = store.pull(agent, limit, leaseSeconds)
-        sendJson(res, 200, { messages, count: messages.length })
-        return
-      }
-
-      if (req.method === 'POST' && path === '/v1/ack') {
-        const parsed = parseJsonObject(rawBody)
-        if (!parsed || typeof parsed.messageId !== 'string' || !parsed.messageId || typeof parsed.leaseId !== 'string' || !parsed.leaseId) {
-          sendJson(res, 400, errorBody('bad_request', 'messageId and leaseId are required'))
-          return
-        }
-        if (parsed.outcome !== 'completed' && parsed.outcome !== 'retry') {
-          sendJson(res, 400, errorBody('bad_request', 'outcome must be "completed" or "retry"'))
-          return
-        }
-        const target = store.findById(parsed.messageId)
-        if (!target) {
-          sendJson(res, 404, errorBody('no_such_message', 'message id not found (expired or unknown)'))
-          return
-        }
-        if (target.to !== agent) {
-          sendJson(res, 403, errorBody('forbidden', 'only the recipient may acknowledge this message'))
-          return
-        }
-        const r = store.ack(parsed.messageId, parsed.leaseId, parsed.outcome, typeof parsed.error === 'string' ? parsed.error : null)
-        if (!r.ok) {
-          const message = r.code === 'lease_mismatch' ? 'leaseId does not match the current lease' : 'message is not currently leased'
-          sendJson(res, 409, errorBody(r.code, message))
-          return
-        }
-        sendJson(res, 200, { ok: true, status: r.status, attempts: r.attempts })
-        return
-      }
-
-      if (req.method === 'POST' && path === '/v1/status') {
-        const parsed = parseJsonObject(rawBody)
-        if (!parsed || !Array.isArray(parsed.messageIds)) {
-          sendJson(res, 400, errorBody('bad_request', 'messageIds array is required'))
-          return
-        }
-        const messages = store.getStatus(parsed.messageIds.slice(0, 200).map(String), agent)
-        sendJson(res, 200, { messages })
-        return
-      }
-
-      if (req.method === 'POST' && path === '/v1/recent') {
-        const parsed = parseJsonObject(rawBody)
-        if (!parsed) {
-          sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
-          return
-        }
-        if (parsed.agent !== undefined && parsed.agent !== agent) {
-          sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
-          return
-        }
-        const messages = store.getRecent(agent, clampLimit(parsed.limit))
-        sendJson(res, 200, { messages, count: messages.length })
-        return
-      }
-
-      if (req.method === 'POST' && path === '/v1/messages/query') {
-        const parsed = parseJsonObject(rawBody)
-        if (!parsed) {
-          sendJson(res, 400, errorBody('bad_request', 'body must be a JSON object'))
-          return
-        }
-        if (parsed.agent !== undefined && parsed.agent !== agent) {
-          sendJson(res, 400, errorBody('bad_request', 'body.agent must match X-Relay-Agent header'))
-          return
-        }
-        const messages = store.query({
-          agent,
-          limit: clampLimit(parsed.limit),
-          kind: typeof parsed.kind === 'string' ? parsed.kind : undefined,
-          status: typeof parsed.status === 'string' ? parsed.status : undefined,
-          from: typeof parsed.from === 'string' ? parsed.from : undefined,
-          to: typeof parsed.to === 'string' ? parsed.to : undefined,
-        })
-        sendJson(res, 200, { messages, count: messages.length })
-        return
-      }
-
-      const ackMatch = /^\/messages\/([0-9a-fA-F-]+)\/ack$/.exec(path)
-      if (req.method === 'POST' && ackMatch) {
-        const target = store.findById(ackMatch[1])
-        if (!target) {
-          sendJson(res, 404, errorBody('no_such_message', 'message id not found (expired or unknown)'))
-          return
-        }
-        if (target.to !== agent) {
-          sendJson(res, 403, errorBody('forbidden', 'only the recipient may acknowledge this message'))
-          return
-        }
-        let parsed
-        try {
-          parsed = JSON.parse(rawBody || '{}')
-        } catch {
-          sendJson(res, 400, errorBody('bad_request', 'invalid JSON body'))
-          return
-        }
-        const status = parsed.status === 'error' ? 'error' : 'ok'
-        const ack = normalizeEnvelope(
-          {
-            id: randomUUID(),
-            to: target.from,
-            type: 'ack',
-            body: { status, error: status === 'error' ? String(parsed.error ?? 'unknown') : undefined },
-            replyTo: target.id,
-            ack: false,
-          },
-          agent,
-          new Date().toISOString(),
-        )
-        store.add(ack)
-        sendJson(res, 201, { accepted: true, id: ack.id })
-        return
-      }
-
-      sendJson(res, 404, errorBody('not_found', `no route ${req.method} ${path}`))
+      await handleV2Routes({ config, storeV2, agent, req, res, path, rawBody, notifyFailedSenders, wakeAgent, waitFor })
     } catch (err) {
       // Never log message content — ids and events only.
       console.error(`[relay-broker] ${new Date().toISOString()} error: ${err.message}`)

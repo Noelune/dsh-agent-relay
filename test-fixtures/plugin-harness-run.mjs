@@ -2,8 +2,6 @@
 // real broker. Copied into a temp dir together with lib/ + broker/ and a stub
 // @deepseek-ai/dsh-tools package, then run as a subprocess (so the stub never
 // touches the repo's node_modules). Exits 0 on success.
-import { createStore } from './broker/src/store.js'
-import { createAuthenticator } from './broker/src/auth.js'
 import { createBrokerServer } from './broker/src/server.js'
 import { createV2Store } from './broker/src/store-v2.js'
 import { createServer as createHttpServer } from 'node:http'
@@ -27,10 +25,8 @@ const config = {
     alpha: { allowedWriteTargets: ['dsh'] },
   },
 }
-const store = createStore({ ttlDays: 7, persist: false, dataDir: DATA_DIR })
-const auth = createAuthenticator({ secret: SHARED, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 1e6, rateLimitRemote: 1e6 })
 const v2Store = createV2Store({ dataDir: DATA_DIR, persist: false, leaseSeconds: 600, maxAttempts: 3 })
-const server = createBrokerServer({ config, store, auth, storeV2: v2Store })
+const server = createBrokerServer({ config, storeV2: v2Store })
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const port = server.address().port
 

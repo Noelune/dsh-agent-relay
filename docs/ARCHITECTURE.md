@@ -27,7 +27,7 @@ flowchart LR
 
 | Component | Location | Role |
 |---|---|---|
-| Broker | `broker/` | HTTP service: HMAC auth, routing table, message queue (memory + SQLite default + JSONL compatibility), polling/lease API, brute-force lockout, rate limiting |
+| Broker | `broker/` | Loopback HTTP service: v2/v3 HMAC auth, routing/ACL, SQLite queue with lease + token claims, server-held long-poll wake-up, on-demand worker spawn |
 | dsh plugin | `lib/` (Cordis host/client halves) | Registers five `agent_relay_*` model tools; background heartbeat + lease polling, per-root sessions, receipts and sidebar status |
 | CLI client | `adapters/cli/relay.mjs` | Zero-dependency Node client for scripts, cron jobs, Codex/Claude wrappers |
 | Python client | `adapters/hermes/relay_client.py` | Pure-stdlib Python client for any Python-based agent |
@@ -54,7 +54,8 @@ sequenceDiagram
 
 1. **Lease polling, not push.** The v2/v3 broker keeps messages until TTL and
    agents poll with a bounded lease. Expired leases are re-queued; long work
-   can renew its lease. The frozen v1 cursor-polling compatibility layer remains.
+   can renew its lease. There is no second delivery mechanism to keep in sync:
+    the wake-up is the same claim, answered early.
 2. **HMAC + timestamp anti-replay.** Shared secret signs
    `method + path + timestamp + body`. Timestamp skew > 300 s is rejected.
 3. **Idempotency by message id.** Senders keep the same `id` across retries;
@@ -74,6 +75,6 @@ sequenceDiagram
 ## Compatibility
 
 - Tested against **dsh 0.1.0-rc.6** (web profile plugin loading).
-- Wire protocol **v2/v3 with v1 compatibility** — see [PROTOCOL-V2.md](PROTOCOL-V2.md)
-  and the legacy [PROTOCOL.md](PROTOCOL.md). Adapters refuse incompatible
-  broker versions during negotiation.
+- Wire protocol **v2/v3 only** — see [PROTOCOL-V2.md](PROTOCOL-V2.md). The v1 generation
+  was removed on 2026-09-19 (no v1 message existed in the queue since 2026-08-15
+  and no live client registered). Requests without v2/v3 headers are refused 400.

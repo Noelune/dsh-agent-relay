@@ -5,8 +5,6 @@ import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { createStore } from '../broker/src/store.js'
-import { createAuthenticator } from '../broker/src/auth.js'
 import { createBrokerServer } from '../broker/src/server.js'
 import { createV2Store } from '../broker/src/store-v2.js'
 import { fileURLToPath } from 'node:url'
@@ -25,10 +23,8 @@ before(async () => {
     persist: false, dataDir: DATA_DIR, lockAfterFailures: 5, lockMinutes: 5,
     leaseSeconds: 600, maxAttempts: 3, notifyFailedToSender: true, agents: {},
   }
-  const store = createStore({ ttlDays: 7, persist: false, dataDir: DATA_DIR })
-  const auth = createAuthenticator({ secret: SECRET, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 100000, rateLimitRemote: 100000 })
   const v2Store = createV2Store({ dataDir: DATA_DIR, persist: false, leaseSeconds: 600, maxAttempts: 3 })
-  server = createBrokerServer({ config, store, auth, storeV2: v2Store })
+  server = createBrokerServer({ config, storeV2: v2Store })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   port = server.address().port
 })

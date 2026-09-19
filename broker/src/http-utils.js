@@ -30,10 +30,6 @@ export function parseJsonObject(raw) {
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
 }
 
-export function clampLimit(value, fallback = 50) {
-  const n = Number(value)
-  return Number.isFinite(n) ? Math.min(Math.max(1, Math.floor(n)), 200) : fallback
-}
 
 export function readBody(req) {
   return new Promise((resolve, reject) => {

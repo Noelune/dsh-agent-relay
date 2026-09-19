@@ -1,80 +1,75 @@
 #!/usr/bin/env node
 /**
- * dsh-agent-relay CLI client — wire protocol v1.0.
+ * dsh-agent-relay CLI — the v2/v3 wire-protocol client for scripts, cron jobs
+ * and agent wrappers. Zero dependencies beyond the repo's own client.
  *
- * Zero-dependency Node client for scripts, cron jobs, Codex/Claude wrappers:
+ *   node relay.mjs v2 ask    codex "审一下这个函数"   # hand off, wait for the answer
+ *   node relay.mjs v2 send   codex "note"            # deliver, do not wait
+ *   node relay.mjs v2 pull   --limit 4 --wait 30      # long-poll my inbox
+ *   node relay.mjs v2 ack    <id> completed|retry
+ *   node relay.mjs v2 status <id>… | recent | query
+ *   node relay.mjs doctor                              # is the circle working?
  *
- *   node relay.mjs register --secret <s> --agent alpha
- *   node relay.mjs send beta "hello from alpha" --secret <s> --agent alpha
- *   node relay.mjs recv --secret <s> --agent alpha
- *   node relay.mjs peers --secret <s> --agent alpha
- *   node relay.mjs watch --secret <s> --agent alpha     # continuous polling
+ * The v1 command set (register/recv/peers/handshake) went away with the v1
+ * generation; every command here speaks docs/PROTOCOL-V2.md.
  *
- * Config sources (lowest -> highest priority):
- *   ~/.dsh-relay.json  { "brokerUrl", "agent", "secret" }
- *   env  DSH_RELAY_BROKER_URL / DSH_RELAY_AGENT / DSH_RELAY_SECRET
- *   flags --broker / --agent / --secret
+ * Config sources (lowest -> highest): ~/.dsh-relay.json, environment, flags.
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { RelayClient } from '../../lib/client.js'
 import { RelayClientV2 } from '../../lib/client-v2.js'
+import { resolveSecret } from '../../lib/credentials.mjs'
 
-const STATE_FILE = join(homedir(), '.dsh-relay-state.json')
+// Requests are retained for days by default so an offline peer does not imply a
+// lost handoff; --ttl overrides per call.
+const DEFAULT_TTL_SECONDS = 7 * 86400
 
-/** Per-broker/per-agent poll cursor, so each CLI process only sees NEW messages. */
-function loadState() {
-  try { return JSON.parse(readFileSync(STATE_FILE, 'utf8')) } catch { return {} }
-}
-function saveState(state) {
-  try { writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8') } catch { /* best-effort */ }
-}
-
-const HELP = `dsh-agent-relay CLI — wire protocol v1.0
+const HELP = `dsh-agent-relay CLI — wire protocol v2/v3
 
 Usage:
-  node relay.mjs <command> [options]
+  node relay.mjs v2 <command> [options]
+  node relay.mjs doctor [--json] [--quiet]
 
-Commands:
-  register                     register/heartbeat this agent
-  send <target> <content>      send a message to another agent
-  recv [--limit N] [--once]    pull new messages (polls until empty unless --once)
-  peers                        list registered agents and online status
-  watch                        poll forever, printing new messages as they arrive
-  handshake                    check broker version compatibility
-  pull [--limit N] [--lease S] lease queued messages (v1.1)
-  ack <id> <leaseId> <completed|retry>
-                                acknowledge the current lease (v1.1)
-  status <id> [<id>...]        batch status lookup (v1.1)
-  recent [--limit N]           recent messages for this agent (v1.1)
-  query [--kind K] [--status S] [--from F] [--to T] [--limit N]   read-only search (v1.1)
+Commands
+  health                       broker liveness, protocol, presence, backlog
+  ask <target> <body>          hand off and wait for the answer; a peer nobody can
+                               wake exits 3 at once (message stays retained) unless
+                               --wait-offline is given
+  send <target> <body>         queue a request without waiting (exit 3 when the
+                               peer is unreachable: --mode read|continue|write)
+  pull                         claim messages for --agent (--limit --lease --wait
+                               --root) — --wait is a broker-held long-poll
+  ack <id> <completed|retry>   settle a claim (--error --token)
+  status <id> [<id>...]        delivery status of messages you are party to
+  recent                       recent traffic for --agent (--limit)
+  query                        search (--kind --status --topic --limit)
+  requeue <id>                 put a stuck message back in line
+  cancel <id>                  drop a message you own
+  doctor                       who can actually receive, queue backlog, credential
+                               drift between the broker config and the .env,
+                               storage shape, deployed-adapter drift
 
-v2 commands (wire protocol v2, docs/PROTOCOL-V2.md):
-  v2 health                     broker healthz + protocol metadata
-  v2 send <target> <body>       send a v2 request [--mode read|continue|write] [--session S] [--context C] [--topic T]
-  v2 pull [--limit N] [--lease S]  lease v2 messages addressed to this agent
-  v2 ack <id> <completed|retry> acknowledge a v2 message [--error E]
-  v2 status <id> [<id>...]      batch status (v2)
-  v2 recent [--limit N]         recent v2 messages
-  v2 query [--kind K] [--status S] [--topic T] [--limit N]   search v2 messages
-  v2 requeue <id>               admin: requeue a failed/expired/leased message
-  v2 cancel <id>                admin: cancel a non-terminal message
+Options
+  --broker <url>      default http://127.0.0.1:19121   (env DSH_RELAY_BROKER_URL)
+  --agent <name>      this agent                        (env DSH_RELAY_AGENT)
+  --secret <hex>      credential                        (env DSH_RELAY_SECRET)
+  --secret-env-file <path>
+                      read AGENT_RELAY_<AGENT>_SECRET from a dotenv the deployment
+                      already has, instead of storing a secret in this config
+  --session <s> --context <s> --topic <s> --ttl <seconds> --ttl-wait <seconds>
+  --limit <n> --lease <s> --wait <s> --root <id> --mode <m> --json --help
 
-doctor                          one-pass health check: broker, who can actually
-                                receive, queue backlog, credential drift between
-                                the broker config and the .env, storage shape,
-                                deployed-adapter drift. --json / --quiet.
-                                Exit 0 ok, 2 warnings, 1 broken.
+Credential precedence: --secret, environment, --secret-env-file, then
+secret_ref + vault module. Values are never printed.
+Exit codes: 0 ok, 2 bad usage, 3 the peer could not be reached.
+`
 
-Options:
-  --broker <url>    broker base URL   (env DSH_RELAY_BROKER_URL, default http://127.0.0.1:19121)
-  --agent <name>    this agent name   (env DSH_RELAY_AGENT)
-  --secret <hex>    shared HMAC secret (env DSH_RELAY_SECRET; or ~/.dsh-relay.json)
-  --limit <n>       max messages to return (default 50)
-  --json            machine-readable output
-  --help            show this help
-`;
+/** Read `--name <value>`; a flag followed by another flag has no value. */
+function flagOf(argv, name, fallback = undefined) {
+  const i = argv.indexOf(`--${name}`)
+  return i !== -1 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : fallback
+}
 
 function loadConfig(argv) {
   const env = process.env
@@ -92,7 +87,11 @@ function loadConfig(argv) {
   return {
     brokerUrl: flag.brokerUrl ?? env.DSH_RELAY_BROKER_URL ?? fileCfg.brokerUrl ?? 'http://127.0.0.1:19121',
     agent: flag.agent ?? env.DSH_RELAY_AGENT ?? fileCfg.agent ?? null,
-    secret: flag.secret ?? env.DSH_RELAY_SECRET ?? fileCfg.secret ?? null,
+    secret: flag.secret ?? env.DSH_RELAY_SECRET ?? fileCfg.secret ?? '',
+    secretEnv: env.DSH_RELAY_SECRET_ENV ?? fileCfg.secret_env ?? '',
+    secretEnvFile: flagOf(argv, 'secret-env-file') ?? env.DSH_RELAY_SECRET_ENV_FILE ?? fileCfg.secret_env_file ?? '',
+    secretRef: env.DSH_RELAY_SECRET_REF ?? fileCfg.secret_ref ?? '',
+    vaultModule: env.DSH_RELAY_VAULT_MODULE ?? fileCfg.vault_module ?? '',
     json: argv.includes('--json'),
   }
 }
@@ -126,47 +125,75 @@ async function main() {
     return
   }
   const cfg = loadConfig(argv)
-  // peers/handshake are read-only and do not need an agent identity.
-  const NEEDS_AGENT = new Set(['register', 'send', 'recv', 'watch', 'pull', 'ack', 'status', 'recent', 'query'])
-  if (NEEDS_AGENT.has(command) && !cfg.agent) die('missing agent name: pass --agent <name> or set DSH_RELAY_AGENT')
-  if (!cfg.secret) die('missing secret: pass --secret <hex> or set DSH_RELAY_SECRET (generate with "node setup/setup.js init")')
-  const client = new RelayClient({ brokerUrl: cfg.brokerUrl, agent: cfg.agent, secret: cfg.secret })
+  if (!cfg.agent) die(`--agent <name> is required for "${command}" (or DSH_RELAY_AGENT)`)
+  if (!cfg.secret) cfg.secret = await resolveSecret(cfg)
+  if (!cfg.secret) die('no credential: pass --secret, set DSH_RELAY_SECRET, or point --secret-env-file at the deployment dotenv')
 
   const print = (obj) => { if (cfg.json) console.log(JSON.stringify(obj)); else console.log(JSON.stringify(obj, null, 2)) }
 
-  // ---- v2 subcommands (wire protocol v2) ----
+  // ---- v2/v3 wire protocol ----
   if (command === 'v2') {
-    if (!cfg.agent) die('v2 commands need an agent name: pass --agent <name>')
     const v2 = new RelayClientV2({ endpoint: cfg.brokerUrl, agent: cfg.agent, secret: cfg.secret })
     const sub = argv[1]
-    const flag = (name, fallback) => {
-      const i = argv.indexOf(name)
-      return i !== -1 && argv[i + 1] ? argv[i + 1] : fallback
-    }
+    const flag = (name, fallback) => flagOf(argv, name.replace(/^--/, ''), fallback)
     try {
       switch (sub) {
         case 'health': print(await v2.health()); return
+        case 'ask': {
+          // Hand the task over and wait for the answer, so a delegation reads
+          // like a function call. An unreachable peer exits 3 immediately
+          // instead of burning the deadline; --wait-offline opts back in.
+          const target = argv[2]
+          const body = argv[3]
+          if (!target || body === undefined) die('usage: node relay.mjs v2 ask <target> <body> [--ttl-wait <s>] [--mode …] [--context C] [--wait-offline]')
+          const result = await v2.ask({
+            target,
+            body,
+            context: flag('--context', undefined),
+            sessionRef: flag('--session', cfg.agent),
+            executionMode: flag('--mode', 'read'),
+            timeoutSeconds: Number(flag('--ttl-wait', 240)) || 240,
+            waitOffline: argv.includes('--wait-offline'),
+          })
+          if (cfg.json) print(result)
+          else if (result.ok) console.log(result.reply)
+          else {
+            console.error(`${result.reason} · message_id=${result.message_id} · ${result.hint ?? ''}`)
+            process.exitCode = 3
+          }
+          return
+        }
         case 'send': {
           const target = argv[2]
           const body = argv[3]
           if (!target || body === undefined) die('usage: node relay.mjs v2 send <target> <body> [--mode read|continue|write]')
-          const messageId = await v2.sendRequest({
+          const sent = await v2.sendRequestDetailed({
             target,
             body,
             sessionRef: flag('--session', cfg.agent),
             idempotencyKey: `${cfg.agent}:${Date.now()}`,
-            ttlSeconds: Number(flag('--ttl', 3600)),
+            ttlSeconds: Number(flag('--ttl', DEFAULT_TTL_SECONDS)) || DEFAULT_TTL_SECONDS,
             executionMode: flag('--mode', 'read'),
             context: flag('--context', undefined),
             topic: flag('--topic', undefined),
           })
-          print({ message_id: messageId })
+          print(sent)
+          // Non-zero when nobody is listening and nobody can be woken, so shell
+          // scripts can branch on reachability without parsing the JSON.
+          if (!sent.target_online && !sent.will_wake) process.exitCode = 3
           return
         }
         case 'pull': {
           const limit = Number(flag('--limit', 8))
           const lease = flag('--lease', undefined)
-          const messages = await v2.pull({ limit, leaseSeconds: lease ? Number(lease) : undefined })
+          // --wait turns this into a long-poll held by the broker; --root claims
+          // one conversation only, leaving the rest of the inbox alone.
+          const messages = await v2.pull({
+            limit,
+            leaseSeconds: lease ? Number(lease) : undefined,
+            waitSeconds: Number(flag('--wait', 0)) || 0,
+            matchRootId: flag('--root', undefined),
+          })
           print({ count: messages.length, messages })
           return
         }
@@ -219,128 +246,6 @@ async function main() {
     return
   }
 
-  try {
-    switch (command) {
-      case 'handshake': {
-        const info = await client.handshake()
-        print(info)
-        return
-      }
-      case 'register': {
-        print(await client.register())
-        return
-      }
-      case 'send': {
-        const target = argv[1]
-        const content = argv[2]
-        if (!target || content === undefined) die('usage: node relay.mjs send <target> <content>')
-        const result = await client.send({ to: target, body: { text: content }, ack: argv.includes('--ack') })
-        print(result)
-        return
-      }
-      case 'recv': {
-        const limit = Number(argv[argv.indexOf('--limit') + 1] ?? 50)
-        const state = loadState()
-        const stateKey = `${cfg.brokerUrl}|${cfg.agent}`
-        if (argv.includes('--reset')) delete state[stateKey]
-        client.since = state[stateKey]?.since ?? null
-        let out = []
-        if (argv.includes('--once')) {
-          const r = await client.recv(limit)
-          out = r.messages ?? []
-        } else {
-          // Drain: keep polling until the broker returns no new messages.
-          for (let i = 0; i < 5; i++) {
-            const r = await client.recv(limit)
-            const batch = r.messages ?? []
-            out = out.concat(batch)
-            if (batch.length === 0) break
-          }
-        }
-        // Receiver semantics (PROTOCOL §4/§5): send receipts for requested acks.
-        for (const msg of out) {
-          if (msg.ack && msg.type === 'message') {
-            try { await client.ack(msg.id, 'ok') } catch { /* best-effort */ }
-          }
-        }
-        state[stateKey] = { since: client.since }
-        saveState(state)
-        print({ count: out.length, messages: out })
-        return
-      }
-      case 'peers': {
-        print({ peers: await client.peers() })
-        return
-      }
-      case 'pull': {
-        const limit = Number(argv[argv.indexOf('--limit') + 1] ?? 50)
-        const lease = Number(argv[argv.indexOf('--lease') + 1] ?? NaN)
-        const r = await client.pull(limit, Number.isFinite(lease) ? lease : undefined)
-        print({ count: r.count ?? r.messages.length, messages: r.messages })
-        return
-      }
-      case 'ack': {
-        const id = argv[1]
-        const leaseId = argv[2]
-        const outcome = argv[3]
-        if (!id || !leaseId || (outcome !== 'completed' && outcome !== 'retry')) die('usage: node relay.mjs ack <messageId> <leaseId> <completed|retry>')
-        const errorArg = argv[argv.indexOf('--error') + 1]
-        print(await client.ackOutcome(id, leaseId, outcome, errorArg))
-        return
-      }
-      case 'status': {
-        const ids = argv.slice(1).filter((a) => !a.startsWith('--'))
-        if (!ids.length) die('usage: node relay.mjs status <messageId> [<messageId>...]')
-        print({ messages: await client.status(ids) })
-        return
-      }
-      case 'recent': {
-        const limit = Number(argv[argv.indexOf('--limit') + 1] ?? 50)
-        const messages = await client.recent(limit)
-        print({ count: messages.length, messages })
-        return
-      }
-      case 'query': {
-        const filters = {}
-        for (const k of ['kind', 'status', 'from', 'to', 'limit']) {
-          const i = argv.indexOf(`--${k}`)
-          if (i !== -1 && argv[i + 1]) filters[k] = argv[i + 1]
-        }
-        const messages = await client.query(filters)
-        print({ count: messages.length, messages })
-        return
-      }
-      case 'watch': {
-        console.error(`[relay-cli] watching inbox of ${cfg.agent} at ${cfg.brokerUrl} (Ctrl+C to stop)`)
-        await client.register()
-        const seen = new Set()
-        const poll = async () => {
-          try {
-            const r = await client.recv(50)
-            for (const msg of r.messages ?? []) {
-              if (seen.has(msg.id)) continue
-              seen.add(msg.id)
-              if (seen.size > 2000) seen.delete(seen.values().next().value)
-              if (msg.type === 'ack') {
-                console.error(`[ack ${msg.replyTo}] ${msg.body?.status}`)
-              } else {
-                console.log(JSON.stringify({ from: msg.from, id: msg.id, ts: msg.ts, body: msg.body }))
-                if (msg.ack) { try { await client.ack(msg.id, 'ok') } catch { /* best-effort */ } }
-              }
-            }
-          } catch { /* broker unreachable; retry on next tick */ }
-          setTimeout(poll, 2000)
-        }
-        setTimeout(poll, 2000)
-        await new Promise(() => {})
-        return
-      }
-      default:
-        die(`unknown command "${command}" — run with --help`)
-    }
-  } catch (err) {
-    die(`error: ${err?.message ?? err}`)
-  }
 }
 
 main().catch((err) => die(`error: ${err?.message ?? err}`))

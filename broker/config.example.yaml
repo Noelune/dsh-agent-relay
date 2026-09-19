@@ -10,8 +10,8 @@ broker:
   rateLimitRemote: 120     # strict for non-loopback clients (remote mode)
   messageTtlDays: 7        # unread messages are kept this long
   persist: true            # persistence (survives restarts)
-  storage: sqlite          # sqlite by default; set jsonl for legacy compatibility
-  dataDir: ./data          # where relay.db (or messages.jsonl) lives
+  storage: sqlite          # the only engine; requires Node >= 22.13 (built-in SQLite)
+  dataDir: ./data          # where relay-v2.db (+ WAL) lives
   leaseSeconds: 600        # v2 pull lease default
   maxAttempts: 3           # v2 delivery attempts before a request fails
   notifyFailedToSender: true  # send an "undelivered" reply when a request fails

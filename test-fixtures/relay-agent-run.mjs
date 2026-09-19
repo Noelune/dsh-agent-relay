@@ -1,8 +1,6 @@
 // Standalone relay-agent harness: boot a broker, spawn the relay-agent with a
 // mock backend, send a request, and assert the reply. Copied into a temp dir
 // with lib/ + broker/ + adapters/ and run as a subprocess. Exits 0 on success.
-import { createStore } from './broker/src/store.js'
-import { createAuthenticator } from './broker/src/auth.js'
 import { createBrokerServer } from './broker/src/server.js'
 import { createV2Store } from './broker/src/store-v2.js'
 import { RelayClientV2 } from './lib/client-v2.js'
@@ -19,10 +17,8 @@ const config = {
   persist: false, dataDir: DATA_DIR, lockAfterFailures: 5, lockMinutes: 5,
   leaseSeconds: 600, maxAttempts: 3, notifyFailedToSender: true, agents: {},
 }
-const store = createStore({ ttlDays: 7, persist: false, dataDir: DATA_DIR })
-const auth = createAuthenticator({ secret: SHARED, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 1e6, rateLimitRemote: 1e6 })
 const v2Store = createV2Store({ dataDir: DATA_DIR, persist: false, leaseSeconds: 600, maxAttempts: 3 })
-const server = createBrokerServer({ config, store, auth, storeV2: v2Store })
+const server = createBrokerServer({ config, storeV2: v2Store })
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const port = server.address().port
 

@@ -3,8 +3,6 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createStore } from '../broker/src/store.js'
-import { createAuthenticator } from '../broker/src/auth.js'
 import { createBrokerServer } from '../broker/src/server.js'
 import { canonicalBody, makeSignature, SIGNATURE_HEADERS } from '../broker/src/protocol.js'
 
@@ -21,9 +19,7 @@ before(async () => {
     persist: false, dataDir: DATA_DIR,
     lockAfterFailures: 5, lockMinutes: 5, agents: {},
   }
-  const store = createStore({ ttlDays: 7, persist: false, dataDir: DATA_DIR })
-  const auth = createAuthenticator({ secret: SHARED, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 100000, rateLimitRemote: 100000 })
-  server = createBrokerServer({ config, store, auth })
+  server = createBrokerServer({ config })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   port = server.address().port
 })
@@ -81,15 +77,17 @@ test('a tampered v2 signature is rejected with 401', async () => {
   assert.equal((await res.json()).error.code, 'unauthenticated')
 })
 
-test('v1 requests still authenticate with the v1 scheme', async () => {
-  const { authHeaders } = await import('../lib/sign.js')
-  const headers = authHeaders(SHARED, 'v1agent', 'GET', '/peers', '')
+test('a v1-shaped request is refused rather than silently served', async () => {
+  // The v1 generation was removed on 2026-09-19: without X-Agent-Relay-Agent we
+  // cannot even name the caller, so this must fail fast and explain itself.
   const res = await fetch(`http://127.0.0.1:${port}/peers`, {
     headers: {
       'x-relay-agent': 'v1agent',
-      'x-relay-timestamp': headers['x-relay-timestamp'],
-      'x-relay-signature': headers['x-relay-signature'],
+      'x-relay-timestamp': String(Math.floor(Date.now() / 1000)),
+      'x-relay-signature': 'a'.repeat(64),
     },
   })
-  assert.equal(res.status, 200)
+  assert.equal(res.status, 400)
+  const body = await res.json()
+  assert.match(body.error.message, /v1 protocol was removed/)
 })

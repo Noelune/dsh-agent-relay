@@ -8,8 +8,6 @@
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadConfig, normalizeConfig } from './config.js'
-import { createAuthenticator } from './auth.js'
-import { createStore } from './store.js'
 import { createV2Store } from './store-v2.js'
 import { createBrokerServer } from './server.js'
 
@@ -29,34 +27,19 @@ function parseArgs(argv) {
 
 const { config: configPath } = parseArgs(process.argv.slice(2))
 const config = normalizeConfig(loadConfig(configPath))
-const store = createStore({
-  ttlDays: config.messageTtlDays,
-  persist: config.persist,
-  dataDir: resolve(BROKER_DIR, config.dataDir),
-  storage: config.storage,
-  maxAttempts: config.maxAttempts,
-})
-// Both stores resolve dataDir against the broker directory — a relative
-// dataDir (the './data' default) must not depend on the process CWD.
+// Resolve dataDir against the broker directory: a relative dataDir (the
+// './data' default) must not depend on the process CWD.
 const storeV2 = createV2Store({
   dataDir: resolve(BROKER_DIR, config.dataDir),
   persist: config.persist,
   leaseSeconds: config.leaseSeconds,
   maxAttempts: config.maxAttempts,
 })
-const auth = createAuthenticator({
-  secret: config.secret,
-  agents: config.agents,
-  lockAfterFailures: config.lockAfterFailures,
-  lockMinutes: config.lockMinutes,
-  rateLimitLoopback: config.rateLimitLoopback,
-  rateLimitRemote: config.rateLimitRemote,
-})
-const server = createBrokerServer({ config, store, auth, storeV2 })
+const server = createBrokerServer({ config, storeV2 })
 
 server.listen(config.port, config.host, () => {
   console.log(`[relay-broker] listening on http://${config.host}:${config.port}`)
-  console.log(`[relay-broker] protocol 1.0 | storage=${config.storage} | persist=${config.persist} | ttl=${config.messageTtlDays}d`)
+  console.log(`[relay-broker] protocol v${config.protocolVersion ?? 3} | storage=sqlite | persist=${config.persist} | retention=${config.messageTtlDays}d`)
 })
 
 server.on('error', (err) => {
@@ -86,7 +69,6 @@ sweep.unref()
 function shutdown() {
   clearInterval(sweep)
   server.releaseWaiters?.() // answer held long-polls instead of hanging the close
-  store.close?.()
   storeV2.close?.()
   server.closeAllConnections?.()
   server.close(() => process.exit(0))

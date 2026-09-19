@@ -3,8 +3,6 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createStore } from '../broker/src/store.js'
-import { createAuthenticator } from '../broker/src/auth.js'
 import { createBrokerServer } from '../broker/src/server.js'
 import { createV2Store } from '../broker/src/store-v2.js'
 import { canonicalBody, makeSignature, SIGNATURE_HEADERS } from '../broker/src/protocol.js'
@@ -30,10 +28,8 @@ before(async () => {
       // 'free' has no entry → permissive (may send to anyone)
     },
   }
-  const store = createStore({ ttlDays: 7, persist: false, dataDir: DATA_DIR })
-  const auth = createAuthenticator({ secret: SHARED, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 100000, rateLimitRemote: 100000 })
   v2Store = createV2Store({ dataDir: DATA_DIR, persist: false, leaseSeconds: 600, maxAttempts: 1 })
-  server = createBrokerServer({ config, store, auth, storeV2: v2Store })
+  server = createBrokerServer({ config, storeV2: v2Store })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   port = server.address().port
 })

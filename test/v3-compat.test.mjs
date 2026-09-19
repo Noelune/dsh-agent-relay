@@ -16,8 +16,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
-import { createStore } from '../broker/src/store.js'
-import { createAuthenticator } from '../broker/src/auth.js'
 import { createBrokerServer } from '../broker/src/server.js'
 import { createV2Store } from '../broker/src/store-v2.js'
 import { canonicalBody, makeSignature, SIGNATURE_HEADERS } from '../broker/src/protocol.js'
@@ -74,9 +72,7 @@ async function post(agent, secret, path, payload, keyId = '') {
 }
 
 before(async () => {
-  const store = createStore({ ttlDays: 7, persist: false, dataDir: DATA_DIR })
-  const auth = createAuthenticator({ secret: SHARED, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 100000, rateLimitRemote: 100000 })
-  server = createBrokerServer({ config: CONFIG, store, auth })
+  server = createBrokerServer({ config: CONFIG })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   port = server.address().port
 })

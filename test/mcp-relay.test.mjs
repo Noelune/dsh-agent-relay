@@ -11,8 +11,6 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createStore } from '../broker/src/store.js'
-import { createAuthenticator } from '../broker/src/auth.js'
 import { createBrokerServer } from '../broker/src/server.js'
 import { createV2Store } from '../broker/src/store-v2.js'
 import { RelayClientV2 } from '../lib/client-v2.js'
@@ -33,9 +31,7 @@ before(async () => {
     agents: { claude: {}, codex: {}, offlinepeer: {} },
   }
   v2Store = createV2Store({ dataDir: DATA_DIR, persist: false, leaseSeconds: 600, maxAttempts: 3 })
-  const store = createStore({ ttlDays: 7, persist: false, dataDir: DATA_DIR })
-  const auth = createAuthenticator({ secret: SHARED, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 1e6, rateLimitRemote: 1e6 })
-  server = createBrokerServer({ config, store, auth, storeV2: v2Store })
+  server = createBrokerServer({ config, storeV2: v2Store })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   port = server.address().port
 })

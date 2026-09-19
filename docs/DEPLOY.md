@@ -69,7 +69,7 @@ export DSH_RELAY_AGENT=dsh-agent          # pick a stable name
 ```sh
 export DSH_RELAY_AGENT=alpha
 export DSH_RELAY_SECRET=<the-secret>
-node adapters/cli/relay.mjs register
+node adapters/cli/relay.mjs v2 recent
 node adapters/cli/relay.mjs send beta "hello from alpha"
 node adapters/cli/relay.mjs recv
 node adapters/cli/relay.mjs peers
@@ -81,7 +81,7 @@ node adapters/cli/relay.mjs peers
 from adapters.hermes.relay_client import RelayClient
 
 client = RelayClient("http://127.0.0.1:19121", agent="beta", secret="<the-secret>")
-client.register()
+client.recent()
 client.send("alpha", {"text": "hi"})
 ```
 
@@ -169,7 +169,7 @@ For Docker, mount a generated `broker/config.yaml` or provide `RELAY_SECRET`; th
 
 ---
 
-## v1.1 configuration (optional)
+## Optional configuration
 
 The broker ships with lease-based reliable delivery enabled by default:
 
@@ -177,9 +177,9 @@ The broker ships with lease-based reliable delivery enabled by default:
   re-queued for another attempt.
 - `broker.maxAttempts` (default **3**) — retries allowed before a message is marked `failed`.
 - `broker.storage` (default **sqlite**) — uses Node's built-in SQLite when available; Node 20 falls
-  back to JSONL automatically. Set `jsonl` explicitly for compatibility or migration testing.
+  only `sqlite` is accepted; the JSONL fallback was removed with the v1 generation.
 
-Per-agent routing ACL is optional and off by default (v1.0 compatible). To restrict who may send to
+Per-agent routing ACL is optional and off by default. To restrict who may send to
 whom, add an `agents` block to `broker/config.yaml`:
 
 ```yaml
@@ -207,7 +207,7 @@ cp setup/docker-compose.yml . && RELAY_SECRET=<secret> docker compose up --build
 
 ## Upgrading
 
-- Wire protocol changes bump the protocol version in `docs/PROTOCOL.md`; the
+- Wire protocol changes bump the protocol version in `docs/PROTOCOL-V2.md`; the
   broker and all adapters negotiate it on startup and refuse mismatches loudly.
 - Plugin API changes of dsh itself are tracked in [CHANGELOG.md](../CHANGELOG.md)
   with upgrade notes. This project is tested against dsh 0.1.0-rc.6.

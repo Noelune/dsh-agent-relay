@@ -12,7 +12,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'node:http'
-import { RelayClient } from '../lib/client.js'
+import { RelayClientV2 } from '../lib/client-v2.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(here, '..')
@@ -67,20 +67,27 @@ async function main() {
     failures.push(`plugin module failed to load: ${err.message}`)
   }
 
-  // 4. optional e2e round trip on a scratch broker
+  // 4. optional e2e round trip on a scratch broker (v2/v3 wire protocol)
   if (args.includes('--e2e') && brokerOk && loadSecret()) {
-    const port = getPort(brokerUrl) ?? '19121'
     const secret = loadSecret()
-    const a = new RelayClient({ brokerUrl, agent: 'selfcheck-alpha', secret })
-    const b = new RelayClient({ brokerUrl, agent: 'selfcheck-beta', secret })
-    await a.register(); await b.register()
-    const sent = await a.send({ to: 'selfcheck-beta', body: { text: 'selfcheck round-trip' }, ack: true })
-    const inbox = await b.recv(10)
-    const got = inbox.messages?.find((m) => m.id === sent.id)
-    if (!got) failures.push('e2e: message not delivered')
-    else {
-      await b.ack(sent.id, 'ok')
-      info.push(`e2e round-trip: ${sent.id} delivered to selfcheck-beta`)
+    const opts = { endpoint: brokerUrl, secret, timeoutMs: 30000 }
+    const alpha = new RelayClientV2({ agent: 'selfcheck-alpha', ...opts })
+    const beta = new RelayClientV2({ agent: 'selfcheck-beta', ...opts })
+    const nonce = String(Date.now())
+    const sent = await alpha.sendRequestDetailed({
+      target: 'selfcheck-beta',
+      body: `selfcheck round-trip ${nonce}`,
+      sessionRef: 'selfcheck',
+      idempotencyKey: `selfcheck:${nonce}`,
+    })
+    // A held claim, so this measures real delivery latency rather than a poll period.
+    const inbox = await beta.pull({ limit: 8, waitSeconds: 10 })
+    const got = inbox.find((m) => m.message_id === sent.message_id)
+    if (!got) {
+      failures.push(`e2e: message ${sent.message_id} not delivered in 10 s (target_online=${sent.target_online})`)
+    } else {
+      await beta.ack(got.message_id, 'completed', undefined, got.lease_token)
+      info.push(`e2e round-trip: ${sent.message_id} delivered to selfcheck-beta (peer_online=${sent.target_online})`)
     }
   }
 

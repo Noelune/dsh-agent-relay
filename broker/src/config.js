@@ -77,6 +77,9 @@ export function normalizeConfig(loaded) {
     rateLimitRemote: Number(b.rateLimitRemote ?? 120),
     messageTtlDays: Number(b.messageTtlDays ?? 7),
     persist: booleanConfig(b.persist, true, 'broker.persist'),
+    // Only one storage engine since 2026-09-19; `storage` is accepted so an old
+    // config keeps loading, and anything but sqlite is a loud error rather than a
+    // silent fallback to a second persistence code path.
     storage: String(b.storage ?? 'sqlite').toLowerCase(),
     dataDir: String(b.dataDir ?? './data'),
     lockAfterFailures: Number(s.lockAfterFailures ?? 5),
@@ -100,7 +103,9 @@ export function normalizeConfig(loaded) {
   validateInteger(config.rateLimitRemote, 1, 'broker.rateLimitRemote')
   validateInteger(config.lockAfterFailures, 1, 'security.lockAfterFailures')
   validateInteger(config.lockMinutes, 1, 'security.lockMinutes')
-  if (!['sqlite', 'jsonl'].includes(config.storage)) throw new Error(`invalid broker.storage: ${config.storage}`)
+  if (config.storage !== 'sqlite') {
+    throw new Error(`invalid broker.storage: ${config.storage} — only sqlite is supported since 0.7.0 (the jsonl fallback was removed)`)
+  }
   return config
 }
 

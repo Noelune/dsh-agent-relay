@@ -40,7 +40,7 @@ Out of scope (by design):
 ## Application-level guards
 
 - `POST /messages` validates: `to` required, `from` must match the auth
-  header, self-send rejected, recipient must have registered.
+  header, self-send rejected, target must be a configured member.
 - Body size cap: 1 MB per request.
 - Message TTL: 7 days (configurable); expired messages are dropped.
 - No content logging: broker logs events and ids only; the dsh plugin keeps an
@@ -48,12 +48,12 @@ Out of scope (by design):
   to print.
 - Constant-time signature comparison (`timingSafeEqual`).
 
-## Routing ACL (v1.1)
+## Routing ACL
 
 - Optional per-agent send whitelists: `agents.<name>.allowed_targets` in
   `broker/config.yaml`. A sender with an `allowed_targets` list may only send
   to those recipients (else `403 forbidden`).
-- An agent without an entry may send to anyone (v1.0 default) — add ACL entries
+- An agent without an entry may send read/continue to anyone — add ACL entries
   to tighten a shared broker.
 - Lease-based delivery (`/v1/pull`, `/v1/ack`) adds replay protection at the
   message level: a pulled message is leased to one recipient and only they may

@@ -15,10 +15,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadConfig, normalizeConfig } from '../broker/src/config.js'
-import { createAuthenticator } from '../broker/src/auth.js'
 import { createBrokerServer } from '../broker/src/server.js'
 import { createV2Store } from '../broker/src/store-v2.js'
-import { createStore } from '../broker/src/store.js'
 import { RelayClientV2 } from '../lib/client-v2.js'
 import { wakeCommandFor, planWakeConfig } from '../setup/enable-wake.mjs'
 
@@ -46,10 +44,8 @@ async function bootBroker(dir, agentsConfig) {
     leaseSeconds: 600, maxAttempts: 3, notifyFailedToSender: true,
     agents: agentsConfig,
   }
-  const store = createStore({ ttlDays: 7, persist: false, dataDir: dir })
-  const auth = createAuthenticator({ secret: SECRET, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 1e6, rateLimitRemote: 1e6 })
   const storeV2 = createV2Store({ dataDir: dir, persist: false, leaseSeconds: 600, maxAttempts: 3 })
-  const server = createBrokerServer({ config, store, auth, storeV2 })
+  const server = createBrokerServer({ config, storeV2 })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   return { server, storeV2, port: server.address().port, config }
 }

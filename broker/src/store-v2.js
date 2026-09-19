@@ -6,10 +6,13 @@
  *                queued/leased →(expires_at reached) expired
  *                failed/expired →(admin requeue) queued
  *
- * Persistence: node:sqlite (relay_v2_messages table) when available, else
- * JSONL (relay-v2.jsonl). Both preserve the same records across restarts.
+ * Persistence: `node:sqlite` (relay_v2_messages table) — the single durable
+ * path. The JSONL fallback was removed on 2026-09-19: it rewrote the whole
+ * table on every state change, duplicated the storage semantics, and had no
+ * deployment using it (Node >= 22.13 ships built-in SQLite, and the broker
+ * requires it from this version on).
  */
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -32,7 +35,6 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   const counters = { messages_created: 0, messages_duplicate: 0, pulls: 0, acks_completed: 0, acks_retry: 0 }
   const maxAttemptsValue = Math.max(1, Number(maxAttempts))
   const leaseSecondsValue = Math.max(15, Number(leaseSeconds))
-  const jsonlPath = join(dataDir, 'relay-v2.jsonl')
   let db = null
 
   // Probe node:sqlite like the v1 store does; fall back to JSONL when absent.
@@ -42,7 +44,10 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   } catch {
     DatabaseSync = null
   }
-  if (persist && typeof DatabaseSync === 'function') {
+  if (persist && typeof DatabaseSync !== 'function') {
+    throw new Error('node:sqlite is unavailable — the broker requires Node >= 22.13 (built-in SQLite), or persist: false')
+  }
+  if (persist) {
     try {
       mkdirSync(dataDir, { recursive: true })
       db = new DatabaseSync(join(dataDir, 'relay-v2.db'))
@@ -111,94 +116,48 @@ export function createV2Store({ dataDir, persist = true, leaseSeconds = 600, max
   }
 
   // -- persistence ------------------------------------------------------
+  // One engine, one row per write. `persistAll()`-style whole-table rewrites are
+  // gone: they were the JSONL fallback's only shape and the reason WAL grew.
 
-  function persistAll() {
-    if (!persist) return
-    mkdirSync(dataDir, { recursive: true })
-    if (db) {
-      db.exec('BEGIN IMMEDIATE; DELETE FROM relay_v2_messages;')
-      try {
-        for (const m of messages.values()) {
-          insertStmt.run(
-            m.message_id, m.root_id, m.parent_id, m.origin, m.target, m.kind, m.body,
-            m.session_ref, m.execution_mode, m.allow_shared_write ? 1 : 0, m.context, m.topic, m.idempotency_key,
-            m.status, m.attempts, m.lease_until, m.lease_token ?? null, m.last_error ?? null,
-            m.created_at, m.expires_at, m.completed_at ?? null, m.notified_at ?? null,
-          )
-        }
-        db.exec('COMMIT;')
-      } catch (error) {
-        try { db.exec('ROLLBACK;') } catch {}
-        throw error
-      }
-      return
-    }
-    const lines = [...messages.values()].map((m) => JSON.stringify({ message: m }))
-    writeFileSync(jsonlPath, lines.join('\n') + (lines.length ? '\n' : ''), 'utf8')
-  }
+  const INSERT_COLUMNS = 'message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, allow_shared_write, context, topic, idempotency_key, status, attempts, lease_until, lease_token, last_error, created_at, expires_at, completed_at, notified_at'
 
   function appendOne(m) {
     if (!persist) return
-    mkdirSync(dataDir, { recursive: true })
-    if (db) {
-      insertStmt.run(
-        m.message_id, m.root_id, m.parent_id, m.origin, m.target, m.kind, m.body,
-        m.session_ref, m.execution_mode, m.allow_shared_write ? 1 : 0, m.context, m.topic, m.idempotency_key,
-        m.status, m.attempts, m.lease_until, m.lease_token ?? null, m.last_error ?? null,
-        m.created_at, m.expires_at, m.completed_at ?? null, m.notified_at ?? null,
-      )
-      return
-    }
-    appendFileSync(jsonlPath, JSON.stringify({ message: m }) + '\n', 'utf8')
+    insertStmt.run(
+      m.message_id, m.root_id, m.parent_id, m.origin, m.target, m.kind, m.body,
+      m.session_ref, m.execution_mode, m.allow_shared_write ? 1 : 0, m.context, m.topic, m.idempotency_key,
+      m.status, m.attempts, m.lease_until, m.lease_token ?? null, m.last_error ?? null,
+      m.created_at, m.expires_at, m.completed_at ?? null, m.notified_at ?? null,
+    )
   }
 
   /** Persist a lifecycle transition of one message (single-row UPDATE). */
   function persistUpdate(m) {
     if (!persist) return
-    if (updateStmt) {
-      updateStmt.run(m.status, m.attempts, m.lease_until, m.lease_token ?? null, m.last_error ?? null, m.completed_at ?? null, m.notified_at ?? null, m.message_id)
-      return
-    }
-    persistAll() // JSONL fallback has no row addressing — rewrite
+    updateStmt.run(m.status, m.attempts, m.lease_until, m.lease_token ?? null, m.last_error ?? null, m.completed_at ?? null, m.notified_at ?? null, m.message_id)
   }
 
   /** Drop one message row from persistence. */
   function persistDelete(messageId) {
     if (!persist) return
-    if (deleteStmt) {
-      deleteStmt.run(messageId)
-      return
-    }
-    persistAll()
+    deleteStmt.run(messageId)
   }
 
   function load() {
     if (!persist) return
-    if (db) {
-      const rows = db.prepare('SELECT message_id, root_id, parent_id, origin, target, kind, body, session_ref, execution_mode, allow_shared_write, context, topic, idempotency_key, status, attempts, lease_until, lease_token, last_error, created_at, expires_at, completed_at, notified_at FROM relay_v2_messages').all()
-      for (const row of rows) {
-        const m = {
-          message_id: row.message_id, root_id: row.root_id, parent_id: row.parent_id,
-          origin: row.origin, target: row.target, kind: row.kind, body: row.body,
-          session_ref: row.session_ref ?? '', execution_mode: row.execution_mode,
-          allow_shared_write: Boolean(row.allow_shared_write),
-          context: row.context ?? '', topic: row.topic ?? '',
-          idempotency_key: row.idempotency_key, status: row.status, attempts: row.attempts,
-          lease_until: row.lease_until, lease_token: row.lease_token ?? null, last_error: row.last_error, created_at: row.created_at,
-          expires_at: row.expires_at, completed_at: row.completed_at, notified_at: row.notified_at,
-        }
-        messages.set(m.message_id, m)
-        idemIndex(m.origin).set(m.idempotency_key, m.message_id)
-      }
-      return
-    }
-    if (!existsSync(jsonlPath)) return
-    for (const line of readFileSync(jsonlPath, 'utf8').split(/\r?\n/).filter(Boolean)) {
-      try {
-        const rec = JSON.parse(line)
-        messages.set(rec.message.message_id, rec.message)
-        if (rec.message.idempotency_key) idemIndex(rec.message.origin).set(rec.message.idempotency_key, rec.message.message_id)
-      } catch { /* skip corrupt line */ }
+    const rows = db.prepare(`SELECT ${INSERT_COLUMNS} FROM relay_v2_messages`).all()
+    for (const row of rows) {
+      messages.set(row.message_id, {
+        message_id: row.message_id, root_id: row.root_id, parent_id: row.parent_id,
+        origin: row.origin, target: row.target, kind: row.kind, body: row.body,
+        session_ref: row.session_ref ?? '', execution_mode: row.execution_mode,
+        allow_shared_write: Boolean(row.allow_shared_write),
+        context: row.context ?? '', topic: row.topic ?? '',
+        idempotency_key: row.idempotency_key, status: row.status, attempts: row.attempts,
+        lease_until: row.lease_until, lease_token: row.lease_token ?? null, last_error: row.last_error, created_at: row.created_at,
+        expires_at: row.expires_at, completed_at: row.completed_at, notified_at: row.notified_at,
+      })
+      idemIndex(row.origin).set(row.idempotency_key, row.message_id)
     }
   }
 

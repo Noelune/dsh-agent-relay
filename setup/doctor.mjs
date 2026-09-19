@@ -16,6 +16,7 @@
  * Exit code: 0 all good, 1 something is broken, 2 warnings only.
  * Secrets are never printed — membership and drift are reported by name only.
  */
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
@@ -33,7 +34,7 @@ export function defaultPaths() {
     dataDir: join(homedir(), '.dsh', 'relay-broker', 'data'),
     agentConfig: join(homedir(), '.dsh', 'agent-relay.json'),
     deployedAdapter: join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'hermes', 'plugins', 'agent-relay', 'adapter.py'),
-    repoAdapter: join(REPO_ROOT, 'adapters', 'hermes', 'deployed-adapter.py'),
+    adapterBaseline: join(REPO_ROOT, 'adapters', 'hermes', 'deployed-adapter.json'),
   }
 }
 
@@ -177,12 +178,23 @@ export async function runDoctor(options = {}) {
     add('storage', 'ok', `relay-v2.db ${(db / 1024).toFixed(0)}KB · WAL ${(Math.max(0, wal) / 1024).toFixed(0)}KB`)
   }
 
-  // 8. the deployed Hermes adapter must match its tracked copy
+  // 8. the deployed Hermes adapter must match its recorded baseline (a hash,
+  //    not a copy of the file — storing the copy was 1,476 duplicated lines).
   const deployed = readIf(paths.deployedAdapter)
-  const tracked = readIf(paths.repoAdapter)
-  if (deployed == null) add('adapter', 'warn', `部署副本不存在：${paths.deployedAdapter}`)
-  else if (tracked == null) add('adapter', 'warn', '仓库内没有 adapters/hermes/deployed-adapter.py 基线，无法比对')
-  else add('adapter', deployed === tracked ? 'ok' : 'fail', deployed === tracked ? 'Hermes adapter 与仓库基线一致' : `Hermes adapter 与仓库基线不一致（线上 ${deployed.split(/\r?\n/).length} 行 / 基线 ${tracked.split(/\r?\n/).length} 行）`)
+  const baseline = readIf(paths.adapterBaseline)
+  if (deployed == null) {
+    add('adapter', 'warn', `部署副本不存在：${paths.deployedAdapter}`)
+  } else if (baseline == null) {
+    add('adapter', 'warn', `缺少基线 ${paths.adapterBaseline}（node setup/capture-adapter.mjs 生成）`)
+  } else {
+    let expected = null
+    try { expected = JSON.parse(baseline).sha256 } catch { expected = null }
+    const actual = createHash('sha256').update(deployed, 'utf8').digest('hex')
+    add('adapter', expected && expected === actual ? 'ok' : 'fail',
+      expected === actual
+        ? 'Hermes adapter 与仓库基线一致'
+        : `Hermes adapter 偏离基线（线上 sha ${actual.slice(0, 12)}… / 基线 ${String(expected).slice(0, 12)}…）`)
+  }
 
   const worst = checks.some((c) => c.status === 'fail') ? 'fail' : checks.some((c) => c.status === 'warn') ? 'warn' : 'ok'
   return { status: worst, checks }

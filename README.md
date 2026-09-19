@@ -35,13 +35,13 @@
 - **HMAC-SHA256 严密鉴权体系 (Cryptographic Verification)**  
   所有 HTTP 接口调用均经由 HMAC-SHA256 签名校验，内置 300 秒时间戳重放防护、连续 5 次鉴权失败引发的 5 分钟安全锁定机制及单 IP 速率限制。
 - **高可靠投递与容错机制 (Reliable Delivery & Idempotency)**  
-  采用基于游标的增量轮询与租约确认机制，支持消息 7 天 TTL、SQLite 默认持久化（Node 20 自动回退 JSONL）、指数退避重试 (2s/4s/8s) 与基于 UUID 的幂等去重。
+  请求默认留存 7 天、SQLite 单一路径持久化、租约投递 + 令牌化确认、服务端长轮询唤醒（落库即达）、失败/过期由服务端定时扫描自动回发未送达通知，并以幂等键去重。
 - **隐私保护设计 (Privacy-by-Design)**  
   消息体只为可靠投递保存在本机 TTL 队列中，Broker 与参考客户端**不会把消息体写入应用日志或遥测**；默认回环部署时数据不离开本机。
 - **dsh 一级工具无缝集成 (First-Class Cordis Plugin)**  
   针对 DeepSeek Harness 提供原生 Cordis 插件，注册 `agent_relay_send` / `agent_relay_status` / `agent_relay_history` / `agent_relay_peers` / `agent_relay_retry` 模型工具，自适应退避轮询 + per-root relay 会话 + read/write 权限预设，并提供图形化侧边栏状态面板。
-- **v2 线协议（自用版兼容，v1 兼容层保留）**  
-  与自用版 Python broker 字节兼容的 v2 协议（canonical-JSON 签名、snake_case 信封、execution mode、per-mode ACL、undelivered 通知）；老 v1 客户端照常可用。
+- **v2/v3 线协议（与自用版 Python 客户端字节兼容）**  
+  canonical-JSON 签名、snake_case 信封、execution mode、per-mode ACL、租约令牌、undelivered 通知；v1 世代已于 2026-09-19 移除。
 
 ---
 
@@ -51,16 +51,16 @@
 |---|---|---|---|
 | **架构定位** | 纯粹消息路由总线，保持 Agent 推理独立 | 强依赖 DAG 图逻辑，侵入式驱动控制流 | 人类社交 UI 框架，包含复杂的 Presence 状态 |
 | **部署与网络依赖** | 零第三方依赖，Loopback 本地极速运行 | 需复杂的中间件环境与 Redis/数据库支持 | 需公网访问、OAuth 鉴权与 WebSocket 长连接 |
-| **状态持久化与容错** | 本地 SQLite（JSONL 兼容）+ 7 天 TTL + 租约投递 | 依赖外部集中式数据库管理状态 | 依赖第三方云端服务器消息留存 |
+| **状态持久化与容错** | 本地 SQLite + 7 天留存 + 租约投递 + 长轮询唤醒 | 依赖外部集中式数据库管理状态 | 依赖第三方云端服务器消息留存 |
 | **数据隐私保护** | 默认纯本地，消息体不进入日志或遥测 | 常见云端日志留存与 Embedding 上传 | 消息明文通过第三方服务器中转 |
 
 ---
 
 ## 🏗️ 系统架构与工作流
 
-Relay 同时支持两个协议世代：旧客户端继续使用 v1 兼容层；新客户端使用
+Relay 只服务 v2/v3 两代签名（v2 无 keyId 头、v3 带 keyId 头，共用同一组
 `docs/PROTOCOL-V2.md` 定义的 v2/v3 线协议。v2 使用 lease/ack 投递，v3 在
-v2 基础上增加 `X-Agent-Relay-Key-Id` 密钥轮换；两者共用同一组 `/v1/*` 路由。
+`/v1/*` 路由）；v1 线协议已删除，携带旧头的请求会被明确拒绝并给出指引。
 
 ```mermaid
 sequenceDiagram
@@ -71,7 +71,7 @@ sequenceDiagram
 
     Note over D,C: Loopback 架构下基于 HMAC-SHA256 的通信流程
     D->>B: POST /v1/messages (v2/v3 HMAC Signed)
-    Note over B: 校验时间戳/签名/ACL<br/>写入 SQLite 或 JSONL 队列
+    Note over B: 校验时间戳/签名/ACL<br/>写入 SQLite 队列
     B-->>D: 200 {message_id, root_id, protocol_version}
     C->>B: POST /v1/pull (lease)
     B-->>C: 200 {messages, lease_token}
@@ -178,40 +178,36 @@ node setup/setup.js start
 
 # 注册 Agent 并测试消息收发
 export DSH_RELAY_SECRET=<secret_printed_in_config>
-node adapters/cli/relay.mjs register --agent alpha --secret $DSH_RELAY_SECRET
-node adapters/cli/relay.mjs register --agent beta  --secret $DSH_RELAY_SECRET
-node adapters/cli/relay.mjs send beta "hello from alpha" --agent alpha --secret $DSH_RELAY_SECRET
-node adapters/cli/relay.mjs recv --agent beta --secret $DSH_RELAY_SECRET
+node adapters/cli/relay.mjs v2 send beta "hello from alpha" --agent alpha --secret $DSH_RELAY_SECRET
+node adapters/cli/relay.mjs v2 pull --wait 10 --agent beta --secret $DSH_RELAY_SECRET
+node adapters/cli/relay.mjs doctor
 ```
 
-完整指南详见：[docs/DEPLOY.md](docs/DEPLOY.md) · Wire Protocol 规范：[docs/PROTOCOL.md](docs/PROTOCOL.md) · 系统架构：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 安全规范：[docs/SECURITY.md](docs/SECURITY.md)
+完整指南详见：[docs/DEPLOY.md](docs/DEPLOY.md) · Wire Protocol 规范：[docs/PROTOCOL-V2.md](docs/PROTOCOL-V2.md) · 系统架构：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 安全规范：[docs/SECURITY.md](docs/SECURITY.md)
 
 ---
 
 ## 📜 Wire Protocol 规范
 
-所有语言客户端适配器必须严格遵循对应的 Wire Protocol 规范。旧版 v1 见
-`docs/PROTOCOL.md`；当前 v2/v3 主流程见 `docs/PROTOCOL-V2.md`。
+唯一在用的协议是 **v2/v3**，规范见 [docs/PROTOCOL-V2.md](docs/PROTOCOL-V2.md)；
+v1 世代（`X-Relay-*` 头、`/register`、`/messages` 游标轮询）已于 2026-09-19 移除——
+审计显示 v1 队列表自 2026-08-15 起再无任何消息，且没有任何现役客户端注册过。
 
-### 请求头鉴权规范
+鉴权头：`X-Agent-Relay-Agent`、`X-Agent-Relay-Timestamp`、`X-Agent-Relay-Signature`；
+v3 另带 `X-Agent-Relay-Key-Id`（现役飞书 bot 与 Hermes 适配器都走 v3 的 `legacy` 键）。
 
-旧版 v1 客户端使用以下请求头：
-
-```http
-X-Relay-Agent: <agent_name>
-X-Relay-Timestamp: <unix_epoch_seconds>
-X-Relay-Signature: <hex_hmac_sha256>
-```
-
-v2/v3 客户端使用 `X-Agent-Relay-Agent`、`X-Agent-Relay-Timestamp`、
-`X-Agent-Relay-Signature`，v3 还可增加 `X-Agent-Relay-Key-Id`。签名细节和
-canonical JSON 字节规则以 `docs/PROTOCOL-V2.md` 为准，不要将两代格式混用。
-
-旧版 v1 签名推导公式：
 ```text
-SigningString = Method + "\n" + PathnameWithQuery + "\n" + TimestampSeconds + "\n" + RawBody
-Signature     = HMAC-SHA256(secretKey, SigningString).hex()
+canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+v2: HMAC-SHA256(secret, agent + "
+" + ts + "
+" + METHOD + "
+" + path + "
+" + sha256hex(body))
+v3: 同上，但第二段插入 keyId
 ```
+
+跨语言字节级一致性由 `test/protocol_v2_golden.py` 与 `test/protocol-v2-python.test.mjs`
+锁定；不要自行改写签名规则，改协议请同步更新这两个测试。
 
 ---
 
@@ -219,8 +215,8 @@ Signature     = HMAC-SHA256(secretKey, SigningString).hex()
 
 | 路径 | 功能说明 |
 |---|---|
-| `broker/` | Relay 中继核心服务（零 npm 运行依赖，包含配置、HMAC 鉴权、SQLite/JSONL 持久化与 HTTP 服务）+ Dockerfile |
-| `lib/` | dsh 插件核心：v2 模型工具 (`agent_relay_send` / `status` / `history` / `peers` / `retry`)、v2 客户端 (`client-v2.js`)、v1 兼容客户端、workspace 租约/隔离、插件纯逻辑核心 |
+| `broker/` | Relay 中继核心服务（零 npm 运行依赖：配置、v2/v3 签名鉴权、SQLite 持久化、长轮询唤醒与按需拉起）+ Dockerfile |
+| `lib/` | dsh 插件核心：v2/v3 客户端 (`client-v2.js`)、DSH 的五个 `agent_relay_*` 工具、workspace 租约/隔离、插件纯逻辑核心 |
 | `adapters/cli/` | 零第三方依赖 Node.js CLI 客户端适配器 |
 | `adapters/hermes/` | 纯 Python 标准库客户端适配器 + Hermes 风格 Agent 集成示例 |
 | `adapters/openclaw/` | OpenClaw 框架集成适配说明文档 |
@@ -231,7 +227,7 @@ Signature     = HMAC-SHA256(secretKey, SigningString).hex()
 
 ## 🔧 环境要求 (Requirements)
 
-- Node.js ≥ 20 (Broker 服务、CLI 客户端、dsh 插件)。默认持久化后端为 **SQLite**（零外部依赖，使用 Node 内置 `node:sqlite`，需 **Node ≥ 22.5**，22.13+/23.4+ 起无需 flag）；在更早的运行时自动回退为 JSONL（`broker.storage: jsonl` 可显式选择）。
+- Node.js ≥ 22.13（Broker 服务、CLI 客户端、dsh 插件）。持久化只有 **SQLite** 一条路径（零外部依赖，用 Node 内置 `node:sqlite`，需 **Node ≥ 22.13**）；JSONL 回退已随 v1 世代一起移除。
 - Python ≥ 3.10 (仅 Python 客户端适配器需要，可选)
 - dsh 0.1.0-rc.6 (推荐测试版本)
 

@@ -7,8 +7,6 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createStore } from '../broker/src/store.js'
-import { createAuthenticator } from '../broker/src/auth.js'
 import { createBrokerServer } from '../broker/src/server.js'
 import { createV2Store } from '../broker/src/store-v2.js'
 import { runDoctor, formatReport } from '../setup/doctor.mjs'
@@ -23,10 +21,8 @@ async function withBroker(agents, fn) {
     persist: false, dataDir: dir, lockAfterFailures: 5, lockMinutes: 5,
     leaseSeconds: 600, maxAttempts: 3, notifyFailedToSender: true, agents,
   }
-  const store = createStore({ ttlDays: 7, persist: false, dataDir: dir })
-  const auth = createAuthenticator({ secret: SECRET, lockAfterFailures: 5, lockMinutes: 5, rateLimitLoopback: 1e6, rateLimitRemote: 1e6 })
   const storeV2 = createV2Store({ dataDir: dir, persist: false, leaseSeconds: 600, maxAttempts: 3 })
-  const server = createBrokerServer({ config, store, auth, storeV2 })
+  const server = createBrokerServer({ config, storeV2 })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   try {
     return await fn({ port: server.address().port, dir, storeV2 })
@@ -69,7 +65,7 @@ test('doctor separates members that can receive from members that cannot', async
 
     const report = await runDoctor({
       broker: `http://127.0.0.1:${port}`, config: yaml, envFile, dataDir: dir,
-      deployedAdapter: join(dir, 'none.py'), repoAdapter: join(dir, 'none.py'),
+      deployedAdapter: join(dir, 'none.py'), adapterBaseline: join(dir, 'none.py'),
     })
     const members = find(report, 'members')
     assert.equal(members.status, 'warn', 'somebody is deaf → warn')
@@ -98,7 +94,7 @@ test('doctor tells an operator which member can be woken, and flags credential d
 
     const report = await runDoctor({
       broker: `http://127.0.0.1:${port}`, config: yaml, envFile, dataDir: dir,
-      deployedAdapter: join(dir, 'none.py'), repoAdapter: join(dir, 'none.py'),
+      deployedAdapter: join(dir, 'none.py'), adapterBaseline: join(dir, 'none.py'),
     })
     assert.match(find(report, 'on-demand').detail, /可被唤醒：awake/)
     assert.match(find(report, 'on-demand').detail, /仍无法投递：deaf/)
@@ -124,5 +120,33 @@ test('doctor flags a plaintext secret file', async () => {
       agentConfig, deployedAdapter: join(dir, 'none.py'), repoAdapter: join(dir, 'none.py'),
     })
     assert.equal(find(report, 'plaintext').status, 'fail')
+  })
+})
+
+
+test('doctor detects drift between the deployed adapter and its recorded baseline', async () => {
+  await withBroker({ awake: {} }, async ({ port, dir }) => {
+    const { createHash } = await import('node:crypto')
+    const deployed = join(dir, 'adapter.py')
+    const baseline = join(dir, 'baseline.json')
+    const yaml = join(dir, 'config.yaml')
+    const envFile = join(dir, 'bot.env')
+    const live = 'print("live adapter")\n'
+    writeFileSync(deployed, live, 'utf8')
+    writeFileSync(baseline, JSON.stringify({ sha256: createHash('sha256').update(live, 'utf8').digest('hex'), lines: 2 }), 'utf8')
+    writeFileSync(yaml, 'agents:\n  awake:\n    secret: doctor-secret\n', 'utf8')
+    writeFileSync(envFile, 'AGENT_RELAY_AWAKE_SECRET=doctor-secret\n', 'utf8')
+    writeFileSync(join(dir, 'relay-v2.db'), 'x'.repeat(1024), 'utf8')
+
+    const args = {
+      broker: `http://127.0.0.1:${port}`, config: yaml, envFile, dataDir: dir,
+      deployedAdapter: deployed, adapterBaseline: baseline,
+    }
+    assert.equal(find(await runDoctor(args), 'adapter').status, 'ok')
+
+    writeFileSync(deployed, 'print("somebody edited it")\n', 'utf8')
+    const drifted = find(await runDoctor(args), 'adapter')
+    assert.equal(drifted.status, 'fail')
+    assert.match(drifted.detail, /偏离基线/)
   })
 })
