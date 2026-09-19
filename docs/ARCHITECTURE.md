@@ -27,7 +27,7 @@ flowchart LR
 | Config | `lib/relay-config.mjs` | One layering rule (deployment config → personal file → env → flags) shared by the CLI, the MCP server and the worker |
 | Credentials | `lib/credentials.mjs` | Resolution order and a *redacted* description of where a secret came from |
 | dsh plugin | `lib/index.js` (+ the Cordis host/client halves) | `agent_relay_*` model tools, per-root sessions, receipts, sidebar status |
-| MCP server | `mcp/relay-mcp.mjs` | stdio front door for hosts that start an agent per session: `relay_ask`, `relay_send`, `relay_inbox`, `relay_status`, `relay_agents` |
+| MCP server | `mcp/relay-mcp.mjs` | stdio front door for hosts that start an agent per session: `relay_ask`, `relay_send`, `relay_inbox`, `relay_reply`, `relay_status`, `relay_agents` |
 | Worker | `adapters/relay-agent.mjs` | Short-lived claim-process-ack loop, spawned by the broker; exits when the inbox drains |
 | CLI | `adapters/cli/relay.mjs` | `v2 …` for scripts, cron and wrappers; exit 3 means "peer unreachable" |
 | Python client | `adapters/hermes/relay_client_v2.py` | Pure-stdlib client for Python-based agents |

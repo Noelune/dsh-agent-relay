@@ -11,10 +11,11 @@
  * Transport: stdio JSON-RPC 2.0, newline-delimited (per the MCP stdio
  * transport). Zero dependencies beyond the repo's own client.
  *
- * Tools (five, all of them a single call away):
+ * Tools (six, all of them a single call away):
  *   relay_ask     — hand off and wait for the answer (the synchronous shape)
  *   relay_send    — hand off without waiting
  *   relay_inbox   — claim what peers sent me
+ *   relay_reply   — answer one of those, on the same conversation thread
  *   relay_status  — did my request land / get answered?
  *   relay_agents  — who is in the circle, who is awake right now
  *
@@ -113,6 +114,18 @@ export const TOOLS = [
     },
   },
   {
+    name: 'relay_reply',
+    description: '把答案回到某条收到的请求上（同一条会话线）。传 relay_inbox 给出的 message_id 作为 parent_id。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        parent_id: { type: 'string', description: '要回答的那条请求的 message_id' },
+        answer: { type: 'string', description: '回答正文（对方看不到你的会话，结论和必要依据要写全）' },
+      },
+      required: ['parent_id', 'answer'],
+    },
+  },
+  {
     name: 'relay_status',
     description: '查我发起的请求到哪一步了（queued/leased/completed/failed/expired），或直接看最近的往来。',
     inputSchema: {
@@ -180,9 +193,20 @@ export function makeToolHandler(client, settings) {
           // Ack only after the caller actually received it; a crash before that
           // re-queues on lease expiry rather than swallowing the request.
           if (markDone) await client.ack(msg.message_id, 'completed', undefined, msg.lease_token).catch(() => {})
-          rendered.push(`--- ${msg.origin} → 我 · ${msg.kind} · id=${msg.message_id} · ${msg.execution_mode} ---\n${buildInboundPrompt(msg)}`)
+          rendered.push(`--- ${msg.origin} → 我 · ${msg.kind} · id=${msg.message_id} · ${msg.execution_mode} ---\n${buildInboundPrompt(msg)}\n（回答请用 relay_reply，parent_id=${msg.message_id}）`)
         }
         return text(rendered.join('\n\n'))
+      }
+      case 'relay_reply': {
+        const parentId = String(args.parent_id ?? '').trim()
+        const answer = String(args.answer ?? '')
+        if (!parentId || !answer) return toolError('relay_reply 需要 parent_id 与 answer')
+        try {
+          const replyId = await client.replyTo(parentId, answer)
+          return text(`已回答 ${parentId.slice(0, 8)}…：reply_id=${replyId}（对方在线时会自动收到）`)
+        } catch (err) {
+          return toolError(`relay_reply 失败：${err?.message ?? err}`)
+        }
       }
       case 'relay_status': {
         const ids = Array.isArray(args.message_ids) ? args.message_ids.map(String).filter(Boolean).slice(0, 50) : []

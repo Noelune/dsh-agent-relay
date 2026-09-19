@@ -108,6 +108,7 @@ flowchart LR
 | `relay_ask` | 交给对方并**直接等到回答**（对方不在线时立刻返回 `peer_offline`，请求仍留存数天等自动投递） |
 | `relay_send` | 异步投递，不等 |
 | `relay_inbox` | 取别人发给我的请求（默认读完即确认） |
+| `relay_reply` | 把答案回到某条收到的请求上（同一条会话线） |
 | `relay_status` | 我发的请求到哪一步了 |
 | `relay_agents` | 谁在圈里、谁此刻在线、队列积压 |
 
@@ -211,7 +212,7 @@ v3 另带 `X-Agent-Relay-Key-Id`（现役飞书 bot 与 Hermes 适配器都走 v
 |---|---|
 | `broker/` | Relay 中继核心服务（零 npm 运行依赖：配置、v2/v3 签名鉴权、SQLite 持久化、长轮询唤醒与按需拉起）+ Dockerfile |
 | `lib/` | 可发布的客户端层：v2/v3 客户端 (`client-v2.js`)、协议单一来源 (`protocol.js`)、配置分层 (`relay-config.mjs`)、凭据解析 (`credentials.mjs`)、DSH 的五个 `agent_relay_*` 工具、workspace 租约/隔离 |
-| `mcp/` | MCP stdio 入口 `relay-mcp.mjs`：5 个工具，宿主按会话拉起，不需要常驻轮询进程 |
+| `mcp/` | MCP stdio 入口 `relay-mcp.mjs`：6 个工具，宿主按会话拉起，不需要常驻轮询进程 |
 | `adapters/cli/` | 零第三方依赖 Node.js CLI 客户端适配器 |
 | `adapters/hermes/` | 纯 Python 标准库客户端适配器 + Hermes 风格 Agent 集成示例 |
 | `adapters/openclaw/` | OpenClaw 框架集成适配说明文档 |

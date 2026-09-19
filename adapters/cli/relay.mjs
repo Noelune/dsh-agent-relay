@@ -42,6 +42,7 @@ Commands
                                peer is unreachable: --mode read|continue|write)
   pull                         claim messages for --agent (--limit --lease --wait
                                --root) — --wait is a broker-held long-poll
+  reply <parent_id> <body>     answer a request you claimed, on the same thread
   ack <id> <completed|retry>   settle a claim (--error --token)
   status <id> [<id>...]        delivery status of messages you are party to
   recent                       recent traffic for --agent (--limit)
@@ -195,6 +196,15 @@ async function main() {
             matchRootId: flag('--root', undefined),
           })
           print({ count: messages.length, messages })
+          return
+        }
+        case 'reply': {
+          const parentId = argv[2]
+          const body = argv[3]
+          if (!parentId || body === undefined) die('usage: node relay.mjs v2 reply <parent_id> <body>')
+          // Answering needs only the id: one status lookup resolves who asked,
+          // and the broker inherits root/session/mode/topic from the parent.
+          print({ message_id: await v2.replyTo(parentId, body) })
           return
         }
         case 'ack': {

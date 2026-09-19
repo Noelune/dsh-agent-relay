@@ -95,7 +95,7 @@ function mcpSession() {
 
 const contentText = (response) => (response.result?.content ?? []).map((c) => c.text ?? '').join('\n')
 
-test('initialize + tools/list expose the five collaboration tools', async () => {
+test('initialize + tools/list expose the six collaboration tools', async () => {
   const session = mcpSession()
   try {
     const init = await session.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-host', version: '0' } })
@@ -106,10 +106,14 @@ test('initialize + tools/list expose the five collaboration tools', async () => 
     const list = await session.request('tools/list', {})
     assert.deepEqual(
       list.result.tools.map((t) => t.name).sort(),
-      ['relay_agents', 'relay_ask', 'relay_inbox', 'relay_send', 'relay_status'],
+      ['relay_agents', 'relay_ask', 'relay_inbox', 'relay_reply', 'relay_send', 'relay_status'],
     )
     const ask = list.result.tools.find((t) => t.name === 'relay_ask')
     assert.deepEqual(ask.inputSchema.required, ['target', 'request'])
+    // Answering is a first-class tool: without it an MCP member can read a
+    // request but cannot close the loop on the same conversation thread.
+    const reply = list.result.tools.find((t) => t.name === 'relay_reply')
+    assert.deepEqual(reply.inputSchema.required, ['parent_id', 'answer'])
   } finally {
     session.close()
   }

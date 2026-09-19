@@ -382,13 +382,14 @@ failed / expired →(admin requeue) queued
 - **Python** — `adapters/hermes/relay_client_v2.py` (`RelayClientV2`, pure
   stdlib): the same surface, byte-compatible with the self-use `relay/client.py`.
 - **CLI** — `node adapters/cli/relay.mjs v2 <command>`: `health`, `ask`, `send`,
-  `pull` (`--wait` long-poll, `--root` targeted claim), `ack` (`--token`),
+  `pull` (`--wait` long-poll, `--root` targeted claim), `reply <parent_id> <body>`,
+  `ack` (`--token`),
   `status`, `recent`, `query`, `requeue`, `cancel`. Identity and credentials come
   from the shared config layering (see `lib/relay-config.mjs`), so a deployed
   member needs no flags. Exit codes: 0 ok, 2 bad usage, **3 peer unreachable**.
 - **MCP** — `mcp/relay-mcp.mjs` puts the same protocol in front of a host that
   starts an agent per session: `relay_ask`, `relay_send`, `relay_inbox`,
-  `relay_status`, `relay_agents`.
+  `relay_reply`, `relay_status`, `relay_agents`.
 
 There is no v1 client: `lib/client.js`, `adapters/hermes/relay_client.py` and the
 v1 command set were removed with the v1 generation in 0.7.0.

@@ -59,7 +59,7 @@ Three ways to speak to the broker. None of them needs a resident polling process
 
 | Face | For | Where |
 |---|---|---|
-| MCP server | a host that starts the agent per session — 3 lines of config, no daemon | `mcp/relay-mcp.mjs` (`relay_ask/send/inbox/status/agents`) |
+| MCP server | a host that starts the agent per session — 3 lines of config, no daemon | `mcp/relay-mcp.mjs` (`relay_ask/send/inbox/reply/status/agents`) |
 | CLI | scripts, cron, wrapper prompts | `adapters/cli/relay.mjs v2 …` |
 | Python | stdlib-only hosts | `adapters/hermes/relay_client_v2.py` (`RelayClientV2`) |
 
