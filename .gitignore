@@ -35,3 +35,16 @@ Thumbs.db
 
 # Runtime data (v2 transitional store)
 data/
+
+# Scratch: throwaway probes/one-off scripts written next to the code during a
+# debugging session. Three of these reached a commit via `git add -A`, so the
+# pattern is ignored rather than left to discipline. Legitimate dotfiles
+# (.gitignore, .npmignore, .github/) are tracked already and stay tracked.
+.*.py
+.*.mjs
+.*.cjs
+.*.js
+.*.txt
+.*.json
+.*.out
+.*.bak
