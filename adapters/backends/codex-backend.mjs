@@ -18,57 +18,106 @@
  *                  write-mode requests into a git worktree)
  */
 import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import { resolveCli } from './resolve-cli.mjs'
 
-const RESOLVED = resolveCli(process.env.CODEX_CMD || (process.platform === 'win32' ? 'codex.cmd' : 'codex'))
+/**
+ * Extract the assistant answer from `codex exec --json` output.
+ *
+ * That CLI prints an **event stream** — one JSON object per line
+ * (`thread.started`, `turn.started`, `item.completed`, `turn.completed`) — not a
+ * single result object. The previous whole-payload `JSON.parse(stdout)` therefore
+ * always threw and the relay forwarded the raw event dump as the "reply", which
+ * is unusable for an automated handoff (observed live 2026-09-19).
+ *
+ * @param {string} stdout raw stdout from the codex CLI
+ * @returns {{text: string, kind: 'answer'|'error'|'raw'}}
+ */
+export function extractCodexReply(stdout) {
+  const text = String(stdout ?? '')
+  const answers = []
+  const errors = []
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('{')) continue
+    let event
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      continue // partial or non-JSON line
+    }
+    // Older single-result shape, plus the newer itemised events.
+    const legacy = event.reply ?? event.result ?? event.text
+    if (typeof legacy === 'string' && legacy.trim()) answers.push(legacy.trim())
+    const item = event.item
+    if (item?.type === 'agent_message' && typeof item.text === 'string' && item.text.trim()) {
+      answers.push(item.text.trim())
+    } else if (item?.type === 'error' && typeof item.message === 'string' && item.message.trim()) {
+      errors.push(item.message.trim())
+    } else if (event.type === 'error' && typeof event.message === 'string' && event.message.trim()) {
+      errors.push(event.message.trim())
+    }
+  }
+  if (answers.length) return { text: answers.join('\n\n'), kind: 'answer' }
+  if (errors.length) return { text: errors.join('\n'), kind: 'error' }
+  const whole = text.trim()
+  // A CLI that ignored --json and printed prose is still a usable answer.
+  return whole && !whole.startsWith('{') ? { text: whole, kind: 'raw' } : { text: '', kind: 'raw' }
+}
 
-// The codex `exec --json` output is a JSON object on stdout. Build the args to
-// match the reference codex CLI layout: approval/sandbox flags come BEFORE the
-// `exec` subcommand, and `-` reads the prompt from stdin. Read/continue turns
-// never bypass the sandbox; write-mode turns run inside the relay worktree.
-function buildArgs(cwd) {
+/** Args for the reference codex layout: flags before `exec`, `-` reads stdin. */
+export function buildCodexArgs(cwd, env = process.env) {
   const args = []
-  const sandbox = process.env.CODEX_SANDBOX
-  if (sandbox) args.push('--sandbox', sandbox)
+  if (env.CODEX_SANDBOX) args.push('--sandbox', env.CODEX_SANDBOX)
   else args.push('--ask-for-approval', 'never')
-  const model = process.env.CODEX_MODEL
-  if (model) args.push('-m', model)
+  if (env.CODEX_MODEL) args.push('-m', env.CODEX_MODEL)
   if (cwd) args.push('--cd', cwd)
   args.push('exec', '--json', '--skip-git-repo-check', '-')
   return args
 }
 
-let input = ''
-process.stdin.setEncoding('utf8')
-process.stdin.on('data', (chunk) => { input += chunk })
-process.stdin.on('end', () => {
-  const cwd = process.env.RELAY_WORKSPACE || process.cwd()
-  const env = { ...process.env }
-  if (process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME
-  const child = spawn(RESOLVED.file, [...RESOLVED.args, ...buildArgs(cwd)], { env, stdio: ['pipe', 'pipe', 'pipe'] })
-  let stdout = ''
-  let stderr = ''
-  child.stdout.setEncoding('utf8').on('data', (c) => { stdout += c })
-  child.stderr.setEncoding('utf8').on('data', (c) => { stderr += c })
-  child.on('error', (err) => {
-    console.error(`codex-backend failed to start: ${err.message}`)
-    process.exit(2)
+/** Run the CLI and write the extracted answer to stdout. */
+export function run(prompt, { cwd = process.cwd(), resolved, env = process.env, write = (s) => process.stdout.write(s) } = {}) {
+  const cli = resolved ?? resolveCli(env.CODEX_CMD || (process.platform === 'win32' ? 'codex.cmd' : 'codex'))
+  return new Promise((resolvePromise) => {
+    const child = spawn(cli.file, [...cli.args, ...buildCodexArgs(cwd, env)], {
+      env, cwd: cwd || undefined, stdio: ['pipe', 'pipe', 'pipe'],
+      // `resolveCli` may fall back to a raw .cmd shim, which needs a shell on
+      // Windows — honour its `shell` flag instead of failing to spawn.
+      ...(cli.shell ? { shell: true } : {}),
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8').on('data', (c) => { stdout += c })
+    child.stderr.setEncoding('utf8').on('data', (c) => { stderr += c })
+    child.once('error', (err) => {
+      write(`codex-backend failed to start: ${err.message}`)
+      resolvePromise(2)
+    })
+    child.once('close', (code) => {
+      // Prefer whatever the run actually produced, even on a non-zero exit: a
+      // truncated turn still carries the part the peer can act on.
+      const extracted = extractCodexReply(stdout)
+      if (extracted.text) {
+        write(extracted.text)
+        if (code !== 0) write(`\n[codex-backend 退出码 ${code}：${stderr.slice(0, 200)}]`)
+        resolvePromise(0)
+        return
+      }
+      write(stderr.trim() || `codex-backend exited ${code} without output`)
+      resolvePromise(code || 1)
+    })
+    child.stdin.end(prompt)
   })
-  child.on('close', (code) => {
-    if (code !== 0) {
-      console.error(`codex-backend exited ${code}: ${stderr.slice(0, 400)}`)
-      process.exit(code || 1)
-    }
-    // codex exec --json prints the final result JSON (with the assistant reply).
-    try {
-      const parsed = JSON.parse(stdout)
-      const text = parsed?.reply || parsed?.text || parsed?.result
-      console.log(String(text ?? '').trim())
-    } catch {
-      // Fallback: emit the raw output trimmed (best effort).
-      console.log(stdout.trim())
-    }
-    process.exit(0)
+}
+
+// Script behaviour only when executed directly, so `extractCodexReply` stays
+// importable (an import must not start consuming stdin).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  let input = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (chunk) => { input += chunk })
+  process.stdin.on('end', async () => {
+    process.exitCode = await run(input, { cwd: process.env.RELAY_WORKSPACE || process.cwd() })
   })
-  child.stdin.end(input)
-})
+}
