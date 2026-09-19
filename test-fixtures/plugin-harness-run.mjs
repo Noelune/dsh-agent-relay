@@ -16,9 +16,8 @@ mkdirSync(DATA_DIR, { recursive: true })
 
 // ---- real broker ----
 const config = {
-  host: '127.0.0.1', port: 0, secret: SHARED, tls: false,
-  rateLimitLoopback: 1e6, rateLimitRemote: 1e6, messageTtlDays: 7,
-  persist: false, dataDir: DATA_DIR, lockAfterFailures: 5, lockMinutes: 5,
+  host: '127.0.0.1', port: 0, secret: SHARED, tls: false, messageTtlDays: 7,
+  persist: false, dataDir: DATA_DIR,
   leaseSeconds: 600, maxAttempts: 3, notifyFailedToSender: true,
   agents: {
     dsh: { allowedReadTargets: ['alpha'], allowedWriteTargets: ['alpha'] },

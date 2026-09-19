@@ -35,9 +35,8 @@ export async function startBroker({
   persist = false,
 } = {}) {
   const config = {
-    host: '127.0.0.1', port: 0, secret, tls: false,
-    rateLimitLoopback: 1e6, rateLimitRemote: 1e6, messageTtlDays,
-    persist, dataDir, lockAfterFailures: 5, lockMinutes: 5,
+    host: '127.0.0.1', port: 0, secret, tls: false, messageTtlDays,
+    persist, dataDir,
     leaseSeconds, maxAttempts, notifyFailedToSender, agents,
   }
   const store = createV2Store({ dataDir, persist, leaseSeconds, maxAttempts })

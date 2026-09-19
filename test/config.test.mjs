@@ -18,21 +18,30 @@ function baseConfig(overrides = {}) {
   }
 }
 
-test('config: rejects invalid safety and delivery limits at startup', () => {
+test('config: rejects invalid delivery limits at startup', () => {
   const invalid = [
     ['broker.messageTtlDays', baseConfig({ broker: { messageTtlDays: -1 } })],
     ['broker.leaseSeconds', baseConfig({ broker: { leaseSeconds: 0 } })],
     ['broker.leaseSeconds', baseConfig({ broker: { leaseSeconds: 86401 } })],
     ['broker.maxAttempts', baseConfig({ broker: { maxAttempts: -1 } })],
-    ['broker.rateLimitLoopback', baseConfig({ broker: { rateLimitLoopback: 0 } })],
-    ['broker.rateLimitRemote', baseConfig({ broker: { rateLimitRemote: 1.5 } })],
-    ['security.lockAfterFailures', baseConfig({ security: { lockAfterFailures: 0 } })],
-    ['security.lockMinutes', baseConfig({ security: { lockMinutes: -1 } })],
   ]
 
   for (const [name, loaded] of invalid) {
     assert.throws(() => normalizeConfig(loaded), new RegExp(`invalid ${name.replace('.', '\\.')}`))
   }
+})
+
+test('config: the retired v1 rate-limit and lockout keys are ignored, not fatal', () => {
+  // They were never enforced by the v2/v3 broker, and deployments still have
+  // them in config.yaml. Loading must keep working — a broker that refuses to
+  // start over a dead key is how a documented upgrade becomes a manual outage.
+  const config = normalizeConfig(baseConfig({
+    broker: { rateLimitLoopback: 600, rateLimitRemote: 120 },
+    security: { lockAfterFailures: 5, lockMinutes: 5 },
+  }))
+  assert.equal(config.rateLimitLoopback, undefined)
+  assert.equal(config.lockAfterFailures, undefined)
+  assert.equal(config.port, 19121)
 })
 
 test('config: rejects the removed TLS label instead of claiming HTTPS', () => {

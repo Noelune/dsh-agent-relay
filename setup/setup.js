@@ -26,19 +26,13 @@ const CONFIG_TEMPLATE = (secret) => `# dsh-agent-relay broker configuration (gen
 # NEVER commit this file — it contains your shared secret.
 
 broker:
-  host: 127.0.0.1          # loopback by default; use 0.0.0.0 only behind TLS
+  host: 127.0.0.1          # loopback only — this is not a network service
   port: 19121
   secret: ${secret}
   storage: sqlite          # the only engine; needs Node >= 22.13 (built-in SQLite)
-  rateLimitLoopback: 600
-  rateLimitRemote: 120
   messageTtlDays: 7
   persist: true
   dataDir: ./data
-
-security:
-  lockAfterFailures: 5
-  lockMinutes: 5
 `;
 
 function runInit() {

@@ -73,8 +73,6 @@ export function normalizeConfig(loaded) {
     host: String(b.host ?? '127.0.0.1'),
     port: Number(b.port ?? 19121),
     secret,
-    rateLimitLoopback: Number(b.rateLimitLoopback ?? 600),
-    rateLimitRemote: Number(b.rateLimitRemote ?? 120),
     messageTtlDays: Number(b.messageTtlDays ?? 7),
     persist: booleanConfig(b.persist, true, 'broker.persist'),
     // Only one storage engine since 2026-09-19; `storage` is accepted so an old
@@ -82,8 +80,6 @@ export function normalizeConfig(loaded) {
     // silent fallback to a second persistence code path.
     storage: String(b.storage ?? 'sqlite').toLowerCase(),
     dataDir: String(b.dataDir ?? './data'),
-    lockAfterFailures: Number(s.lockAfterFailures ?? 5),
-    lockMinutes: Number(s.lockMinutes ?? 5),
     leaseSeconds: Number(b.leaseSeconds ?? 600),
     maxAttempts: Number(b.maxAttempts ?? 3),
     notifyFailedToSender: booleanConfig(b.notifyFailedToSender, true, 'broker.notifyFailedToSender'),
@@ -99,10 +95,10 @@ export function normalizeConfig(loaded) {
   validateInteger(config.messageTtlDays, 0, 'broker.messageTtlDays')
   validateInteger(config.leaseSeconds, 1, 'broker.leaseSeconds', MAX_LEASE_SECONDS)
   validateInteger(config.maxAttempts, 0, 'broker.maxAttempts')
-  validateInteger(config.rateLimitLoopback, 1, 'broker.rateLimitLoopback')
-  validateInteger(config.rateLimitRemote, 1, 'broker.rateLimitRemote')
-  validateInteger(config.lockAfterFailures, 1, 'security.lockAfterFailures')
-  validateInteger(config.lockMinutes, 1, 'security.lockMinutes')
+  // `broker.rateLimit*` and `security.lock*` are deliberately not implemented:
+  // they were v1 (`auth.js`) features, and the v1 generation is gone. An old
+  // config file keeps loading with those keys ignored — the alternative was a
+  // SECURITY.md that credits a lockout which never ran.
   if (config.storage !== 'sqlite') {
     throw new Error(`invalid broker.storage: ${config.storage} — only sqlite is supported since 0.7.0 (the jsonl fallback was removed)`)
   }

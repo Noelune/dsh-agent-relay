@@ -30,10 +30,8 @@ let port
 // Config shape the way config.js normalizes it: alpha has an explicit keyring
 // with a rotated key plus the legacy one; beta carries only its own secret.
 const CONFIG = {
-  host: '127.0.0.1', port: 0, secret: SHARED,
-  rateLimitLoopback: 100000, rateLimitRemote: 100000, messageTtlDays: 7,
+  host: '127.0.0.1', port: 0, secret: SHARED, messageTtlDays: 7,
   persist: false, dataDir: DATA_DIR,
-  lockAfterFailures: 5, lockMinutes: 5,
   adminAgents: new Set(['ops']),
   agents: {
     alpha: {

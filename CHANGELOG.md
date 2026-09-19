@@ -35,6 +35,65 @@ database connection: state an outside writer puts in the table is exactly what t
 store reports, which cannot be asserted while a `Map` sits in the middle.
 Suite: 139 → 144 passing.
 
+The store's own 5-minute housekeeping timer also went: `broker/src/index.js` already
+sweeps every 60 s and has to, because expiry is what produces the "undelivered"
+notices. One scheduler, one rule.
+
+### Changed — one config layer for every command-line entrypoint
+
+`lib/relay-config.mjs` now owns the layering (deployment config → personal file →
+`AGENT_RELAY_*` / `DSH_RELAY_*` → flags, both key spellings accepted), and the CLI,
+the MCP server and the inbox worker call it. They had each carried their own copy,
+and the copies had drifted: the CLI never read `~/.dsh/agent-relay.json`, so every
+scripted call had to repeat `--broker`, `--agent` and a credential flag. A bare
+`node adapters/cli/relay.mjs v2 pull` now works on a deployed member. The CLI and
+the worker additionally pass `keyId`, so a member configured for a rotated key
+signs v3 like the plugin's own clients do. `lib/index.js` keeps its own resolver:
+its input is a host settings object, not argv flags.
+
+### Removed — four config keys that did nothing
+
+`broker.rateLimitLoopback`, `broker.rateLimitRemote`, `security.lockAfterFailures`
+and `security.lockMinutes` were parsed, validated, documented in
+`config.example.yaml` and credited by `SECURITY.md` as the brute-force mitigation —
+but nothing enforced them; they were v1 (`broker/src/auth.js`) features and died
+with that generation. They are gone from the loader, the template and the docs.
+Old `config.yaml` files keep loading with those keys ignored rather than refusing to
+start. The honest statement of the boundary is now in `SECURITY.md`: no rate
+limiter, no lockout, the loopback bind is what contains it.
+
+### Documentation — merged, and the false parts removed
+
+- `docs/DEPLOY.md` (287 → 165 lines): the v1 commands (`register`, `peers`,
+  `recv`, `watch`), the deleted Python client, "Mode B — distributed" and the
+  half-sentence about a JSONL fallback are gone; it now covers `doctor`,
+  `add-member`, `sync-secrets`, `enable-wake`, the MCP/CLI/Python faces, the
+  credential layering, long-poll verification, and what the retention numbers
+  actually are.
+- `docs/AGENT-DEPLOY.md` (144 → 76): the task book keeps its shape (role,
+  decision points, DoD, report format, pitfalls) and stops instructing an agent
+  to call endpoints that no longer exist. Command blocks now point at DEPLOY.md
+  instead of repeating them.
+- `docs/PROTOCOL-V2.md`: retitled v2/v3 (one document, both signature schemes),
+  corrected the HTTP body cap (1 MiB `MAX_BODY_BYTES`, not `MAX_BODY_CHARS * 3`),
+  `protocol_version`, the wake condition (no held pull **and** no claim within
+  90 s), the requeue/cancel authorization rules including `admin_agents`, the
+  `400` for an unsigned request and `409` for a dead lease, and the claim that v1
+  clients "remain". `allow_shared_write` is documented, including who honours it.
+- `docs/ARCHITECTURE.md`: loopback-only, claim-derived presence, the real
+  signature string, `(origin, idempotency_key)` dedup, the SQLite single-truth
+  decision, and rows for `mcp/`, the worker, `relay-config.mjs` and `setup/`
+  tools. New "Assessed and not done" section records the named-pipe and
+  v2-scheme-removal judgements with their evidence.
+- `docs/SECURITY.md`: rewritten against the code — what mitigates, what does not
+  exist, `wake_command` named as the config-driven process-launch surface, and
+  the DPAPI/`secret_env_file` credential story.
+- `README.zh.md` deleted. It was not a translation: it was a second copy of the
+  same Chinese README, already drifting and still documenting v1 commands.
+  `README.md` is the single product document and is now free of the
+  lockout/rate-limit and registration claims, with its machine-specific paths
+  replaced by `<repo>`.
+
 ## [0.7.0] — 2026-09-19
 
 ### Removed — the v1 generation and every duplicated code path

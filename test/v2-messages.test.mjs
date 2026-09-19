@@ -16,9 +16,8 @@ let v2Store
 
 before(async () => {
   const config = {
-    host: '127.0.0.1', port: 0, secret: SHARED, tls: false,
-    rateLimitLoopback: 100000, rateLimitRemote: 100000, messageTtlDays: 7,
-    persist: false, dataDir: DATA_DIR, lockAfterFailures: 5, lockMinutes: 5,
+    host: '127.0.0.1', port: 0, secret: SHARED, tls: false, messageTtlDays: 7,
+    persist: false, dataDir: DATA_DIR,
     agents: { [AGENT]: { allowedTargets: ['peer'] } },
   }
   v2Store = createV2Store({ dataDir: DATA_DIR, persist: false })

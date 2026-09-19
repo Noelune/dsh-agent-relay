@@ -31,9 +31,8 @@ let config
 
 before(async () => {
   config = {
-    host: '127.0.0.1', port: 0, secret: SHARED, tls: false,
-    rateLimitLoopback: 100000, rateLimitRemote: 100000, messageTtlDays: 7,
-    persist: false, dataDir: DATA_DIR, lockAfterFailures: 5, lockMinutes: 5,
+    host: '127.0.0.1', port: 0, secret: SHARED, tls: false, messageTtlDays: 7,
+    persist: false, dataDir: DATA_DIR,
     maxAttempts: 3, leaseSeconds: 600, notifyFailedToSender: true,
     // Entries without a secret/ACL keep shared-secret auth and open routing,
     // while making the members visible to /healthz the way a real config does.

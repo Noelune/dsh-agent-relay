@@ -1,287 +1,166 @@
 # Deployment Guide
 
-Two modes:
+One supported topology: the broker and every member run on the same machine and
+talk over loopback (`127.0.0.1:19121`). There is no second mode. The reason is
+in [ARCHITECTURE.md](ARCHITECTURE.md#design-decisions) — short version: HMAC proves who
+sent a request, it does not encrypt anything, so putting this broker on a network
+would trade a zero-exposure design for a home-made HTTPS replacement. If a
+cross-machine circle is ever needed, the honest answer is a TLS-terminated tunnel
+in front of the loopback port, not a different configuration here.
 
-- **Mode A — single machine (default, recommended):** broker and all agents on
-  one computer, everything on loopback. Zero network exposure, 5-minute setup.
-- **Mode B — distributed (advanced):** agents on different machines share one
-  broker. Requires a server, TLS, and careful secret management.
-
----
-
-## Mode A — single machine
-
-### 1. Clone and install
-
-```sh
-git clone https://github.com/Noelune/dsh-agent-relay.git
-cd dsh-agent-relay
-# broker has no third-party dependencies; nothing to install for the CLI either
-```
-
-### 2. Initialize (generates a random secret + config)
-
-```sh
-node setup/setup.js init
-```
-
-This writes `broker/config.yaml` with a fresh 64-hex-char secret. **Never
-commit this file** (it is gitignored).
-
-### 3. Start the broker
-
-```sh
-node setup/setup.js start
-# or, foreground with a custom config:
-node broker/src/index.js --config broker/config.yaml
-```
-
-Verify:
-
-```sh
-node setup/setup.js selfcheck
-```
-
-### 4. Connect agents
-
-Self-use shortcut — onboard a member in one step (secret generation, broker
-YAML block, agent-side `.env` entry, default ACLs, post-write verification):
-
-```sh
-node setup/add-member.mjs <name>          # full member, read mode, no write
-node setup/add-member.mjs <name> --show   # also print the generated secret once
-```
-
-Restart the broker afterwards (exact commands are printed). Fine-grained
-ACLs: `--read-targets`, `--write-targets`, `--no-inbound`.
-
-**dsh (recommended):**
-
-```sh
-dsh plugin --profile web add dsh-agent-relay
-# then configure the shared secret (env or plugin settings):
-export DSH_RELAY_SECRET=<the-secret-from-config.yaml>
-export DSH_RELAY_AGENT=dsh-agent          # pick a stable name
-```
-
-**CLI client** (scripts, Codex/Claude wrappers):
-
-```sh
-export DSH_RELAY_AGENT=alpha
-export DSH_RELAY_SECRET=<the-secret>
-node adapters/cli/relay.mjs v2 recent
-node adapters/cli/relay.mjs send beta "hello from alpha"
-node adapters/cli/relay.mjs recv
-node adapters/cli/relay.mjs peers
-```
-
-**Python client** (Hermes-style agents):
-
-```python
-from adapters.hermes.relay_client import RelayClient
-
-client = RelayClient("http://127.0.0.1:19121", agent="beta", secret="<the-secret>")
-client.recent()
-client.send("alpha", {"text": "hi"})
-```
-
-### 5. Verify the round trip
-
-```sh
-# terminal 1
-node adapters/cli/relay.mjs watch --agent beta --secret <secret>
-# terminal 2
-node adapters/cli/relay.mjs send beta "hello" --agent alpha --secret <secret>
-# terminal 1 prints the message
-```
-
-### 6. Keep broker YAML and agent .env secrets in sync
-
-Self-use deployments keep member secrets in two places: the broker YAML
-(`agents.<name>.secret`) and the agent-side `.env`
-(`AGENT_RELAY_<NAME>_SECRET`). When they drift, members start receiving 401s.
-Check — and optionally repair — with:
-
-```sh
-node setup/sync-secrets.mjs           # check: exit 1 on drift
-node setup/sync-secrets.mjs --apply   # copy .env values into the YAML (backs up first)
-```
-
-Secret values are never printed. Override the default locations with
-`--config <yaml>` / `--env <file>`. New members are created with
-`setup/add-member.mjs`, which writes both stores consistently from the
-start; this tool then guards them against later drift.
+An agent-driven variant of this walkthrough — role, decision points, a
+Definition-of-Done checklist and a report format — is
+[AGENT-DEPLOY.md](AGENT-DEPLOY.md). `lib/index.js` points the model at that file.
 
 ---
 
-## Mode B — distributed (advanced)
+## 1. Requirements
 
-Requirements: a server with a public (or VPN-reachable) address, TLS, and
-discipline about secret handling.
+- Node.js **≥ 22.13** — the broker uses the built-in `node:sqlite`; there are no
+  third-party dependencies to install, for the broker or for the CLI.
+- Port 19121 free (change `broker.port` in the config if it is not).
 
-### 1. Broker on the server
-
-```sh
-git clone https://github.com/Noelune/dsh-agent-relay.git
-cd dsh-agent-relay
-node setup/setup.js init
-# edit broker/config.yaml:
-#   host: 0.0.0.0
-#   rateLimitRemote: 120
-```
-
-### 2. TLS — mandatory
-
-HMAC only proves the sender; it does not encrypt. On a public network, run the
-broker behind a reverse proxy with TLS (nginx / Caddy / cloud load balancer)
-terminating HTTPS, forwarding to 127.0.0.1:19121. The broker itself stays
-loopback-bound behind the proxy:
-
-```nginx
-server {
-  listen 443 ssl;
-  server_name relay.example.com;
-  ssl_certificate     /etc/letsencrypt/live/relay.example.com/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/relay.example.com/privkey.pem;
-  location / {
-    proxy_pass http://127.0.0.1:19121;
-    proxy_set_header X-Forwarded-For $remote_addr;
-  }
-}
-```
-
-### 3. Agents point at the HTTPS URL
+## 2. Init, start, check
 
 ```sh
-export DSH_RELAY_BROKER_URL=https://relay.example.com
-export DSH_RELAY_SECRET=<same-secret-everywhere>
+node setup/setup.js init      # writes broker/config.yaml with a random 64-hex secret
+node setup/setup.js start     # or foreground: node broker/src/index.js --config broker/config.yaml
+node setup/doctor.mjs         # one command: is the circle actually working?
 ```
 
-### 4. Hardening checklist
+`config.yaml` holds a credential — never commit it, never paste it into a log or
+a chat. To start the broker at login on Windows, a one-line `.bat` is enough:
 
-- [ ] TLS only (no plaintext HTTP on the public interface)
-- [ ] Secret distributed out-of-band (password manager / sealed envelope), rotated regularly
-- [ ] Restrict `GET /messages` polling to known agents (HMAC already does this)
-- [ ] Watch the broker logs for repeated `locked` events (brute-force attempts)
-- [ ] Keep `config.yaml` out of version control everywhere
-
-For Docker, mount a generated `broker/config.yaml` or provide `RELAY_SECRET`; the image refuses to start with the example placeholder.
-
----
-
-## Optional configuration
-
-The broker ships with lease-based reliable delivery enabled by default:
-
-- `broker.leaseSeconds` (default **600**) — how long a pulled message is leased before it is
-  re-queued for another attempt.
-- `broker.maxAttempts` (default **3**) — retries allowed before a message is marked `failed`.
-- `broker.storage` (default **sqlite**) — uses Node's built-in SQLite when available; Node 20 falls
-  only `sqlite` is accepted; the JSONL fallback was removed with the v1 generation.
-
-Per-agent routing ACL is optional and off by default. To restrict who may send to
-whom, add an `agents` block to `broker/config.yaml`:
-
-```yaml
-agents:
-  alpha:
-    allowed_targets: [beta, gamma]
+```bat
+cd /d "C:\path\to\dsh-agent-relay"
+start "" /b node broker\src\index.js --config "%USERPROFILE%\.dsh\relay-broker\config-19121.yaml"
 ```
 
-An agent with `allowed_targets` may only send to the listed names (else `403 forbidden`); an agent
-without an entry may send to anyone. The dsh plugin records completed replies as receipts
-(`~/.dsh-agent-relay-receipts.json`) so a restarted agent replays, not re-runs, finished requests.
+`doctor` reads the things that used to take six manual probes: broker version and
+protocol, which members are online (a claim within the last 90 s), queue backlog,
+failed/expired history, which members can be woken on demand, whether the broker
+YAML and the agent-side dotenv still agree, plaintext keys outside the vault, the
+SQLite/WAL size, and whether the deployed Hermes adapter matches its baseline.
+Exit code 0/1/2 = ok/fail/warn; `--json` for scripts.
 
-## Containerized deployment (optional)
+## 3. Add members
+
+```sh
+node setup/add-member.mjs <name>           # secret + broker YAML block + agent .env entry + default ACLs
+node setup/add-member.mjs <name> --show    # also print the generated secret once
+node setup/sync-secrets.mjs                # check for drift between the two stores (exit 1 on drift)
+node setup/sync-secrets.mjs --apply        # repair, backing up first
+```
+
+Restart the broker afterwards; the exact command is printed. Credential values
+are never echoed by either tool.
+
+Three ways to speak to the broker. None of them needs a resident polling process:
+
+| Face | For | Where |
+|---|---|---|
+| MCP server | a host that starts the agent per session — 3 lines of config, no daemon | `mcp/relay-mcp.mjs` (`relay_ask/send/inbox/status/agents`) |
+| CLI | scripts, cron, wrapper prompts | `adapters/cli/relay.mjs v2 …` |
+| Python | stdlib-only hosts | `adapters/hermes/relay_client_v2.py` (`RelayClientV2`) |
+
+Config layers for the CLI, MCP server and worker are shared and lowest-first:
+the deployment's own `~/.dsh/agent-relay.json`, then `~/.dsh-relay.json`, then the
+environment (`AGENT_RELAY_*`, also `DSH_RELAY_*`), then flags. Identity and
+credential resolution: `--secret` → env var → `--secret-env-file` (an existing
+dotenv, read at runtime) → `secret_ref` + `vault_module` (a DPAPI-backed vault
+entry). With the deployment config in place a bare `node adapters/cli/relay.mjs
+v2 pull` works — it then speaks as that file's `agent`, so pass `--agent` to act
+for somebody else. Exit code 3 means the peer could not be reached.
+
+## 4. Make an offline member reachable
+
+A member is reachable in one of two ways: somebody is polling for it, or the
+broker can start it. The second is what `wake_command` is for — when a message
+lands for an agent with no recent claim activity, the broker spawns that command
+once; the worker claims, processes, acks and exits when the queue drains.
+
+```sh
+node setup/enable-wake.mjs --agent <name>           # dry run: shows what would be written
+node setup/enable-wake.mjs --agent <name> --apply   # writes it, backing up the config first
+```
+
+The child gets `AGENT_RELAY_AGENT`, `AGENT_RELAY_SECRET` and
+`AGENT_RELAY_BROKER_URL` in its **environment**, never on the command line (argv
+is world-readable in the process list), and the broker URL is the address it is
+actually bound to. Members with a claim in the last 90 s are not woken again, so a
+resident poller and an on-demand worker cannot both serve the same message.
+
+## 5. Verify the round trip
+
+```sh
+# A: hold a long-poll open (the broker answers as soon as something lands)
+node adapters/cli/relay.mjs v2 pull --wait 30 --agent beta --secret-env-file <env>
+# B: send — the response says whether the peer is reachable at all
+node adapters/cli/relay.mjs v2 send beta "hello" --agent alpha --secret-env-file <env>
+#   -> { message_id, created, root_id, target_online, last_seen_at, will_wake, hint? }
+node adapters/cli/relay.mjs v2 ack <message_id> completed --agent beta --secret-env-file <env>
+node adapters/cli/relay.mjs v2 status <message_id> --agent beta --secret-env-file <env>
+```
+
+`target_online: false` is not an error: the message is durably queued and
+`hint` says what happens next (retained for `ttl`, and the sender gets an
+"undelivered" reply if nobody ever claims it). `will_wake: true` means the broker
+started the recipient for you. `v2 ask <target> <body>` does the whole
+send-and-wait-for-the-answer handoff in one call.
+
+Delivery semantics worth knowing while you test: at-least-once, a 600 s lease per
+claim, 3 attempts before `failed`, and a `lease_token` on every claim that acks
+and renewals must present.
+
+## 6. Container (optional)
 
 ```sh
 docker build -t dsh-agent-relay-broker -f broker/Dockerfile .
-docker run -p 19121:19121 -v $PWD/broker/data:/app/data dsh-agent-relay-broker
-```
-
-Or the demo compose stack (broker + two CLI agents):
-
-```sh
+docker run -p 127.0.0.1:19121:19121 -v "$PWD/broker/data:/app/data" dsh-agent-relay-broker
+# or the demo stack (broker + two CLI members):
 cp setup/docker-compose.yml . && RELAY_SECRET=<secret> docker compose up --build
 ```
 
-## Upgrading
+Bind the published port to loopback as above. The image refuses to start with the
+placeholder secret.
 
-- Wire protocol changes bump the protocol version in `docs/PROTOCOL-V2.md`; the
-  broker and all adapters negotiate it on startup and refuse mismatches loudly.
-- Plugin API changes of dsh itself are tracked in [CHANGELOG.md](../CHANGELOG.md)
-  with upgrade notes. This project is tested against dsh 0.1.0-rc.6.
+## 7. Configuration
 
-## Switching from the self-use Python broker (Phase 7)
+[`broker/config.example.yaml`](../broker/config.example.yaml) is the annotated
+authority — copy it and read the comments. The defaults that matter:
 
-This repository is the converged home of the v2 wire protocol and the advanced
-capabilities that previously lived in the self-use Python broker (`relay/`)
-and the custom dsh plugin. To cut over without losing history:
+| Key | Default | Effect |
+|---|---|---|
+| `broker.leaseSeconds` | 600 | how long a claim is exclusive before it re-queues |
+| `broker.maxAttempts` | 3 | claims allowed before a request becomes `failed` |
+| `broker.messageTtlDays` | 7 | how long an unclaimed request is retained |
+| `broker.notifyFailedToSender` | true | an "undelivered" reply goes back to the sender |
+| `security.admin_agents` | none | may requeue/cancel any message |
 
-1. **Prepare the Node broker config** mirroring your self-use `agent_relay`
-   section — per-agent secrets and per-mode ACLs (note: the config loader is a
-   YAML subset — use nested mappings + inline arrays, not flow `{...}` maps):
+There is no rate limiting or auth-failure lockout to configure — those were v1
+features and are not implemented; the loopback bind is the boundary
+([SECURITY.md](SECURITY.md)).
 
-   ```yaml
-   broker:
-     host: 127.0.0.1
-     port: 19122              # NEW port first; keep the old broker running
-     secret: <shared-hex>     # or configure per-agent secrets under agents:
-     storage: sqlite
-     dataDir: ./data
-     leaseSeconds: 600
-     maxAttempts: 3
-     notifyFailedToSender: true
+ACLs are per mode: `allowed_read_targets`, `allowed_continue_targets`,
+`allowed_write_targets` (the legacy `allowed_targets` covers read + continue).
+A member with no entry may send read/continue to anyone; **write is closed unless
+explicitly granted**. `ttl_seconds` is clamped to 60 s … 30 days, and terminal
+messages are purged after 30 days.
 
-   agents:
-     codex:
-       secret: <hex>
-       allowed_read_targets: [claude, hermes, openclaw, dsh]
-       allowed_write_targets: []
-     claude:
-       secret: <hex>
-       allowed_read_targets: [codex, hermes, openclaw, dsh]
-       allowed_write_targets: []
-     hermes:
-       secret: <hex>
-       allowed_read_targets: [codex, claude, openclaw, dsh]
-       allowed_write_targets: [claude]
-     openclaw:
-       secret: <hex>
-       allowed_read_targets: [codex, claude, hermes, dsh]
-       allowed_write_targets: []
-     dsh:
-       secret: <hex>
-       allowed_read_targets: [codex, claude, hermes, openclaw]
-       allowed_write_targets: []
-   ```
+## 8. Migrating from the self-use Python broker
 
-2. **Migrate the message history** from the self-use database:
+```sh
+node setup/migrate-v2.mjs --source "<path>/agent-relay.db" --data-dir ./data
+```
 
-   ```bash
-   node setup/migrate-v2.mjs \
-     --source "D:/AI机器人/飞书CodexClaude机器人/data/agent-relay.db" \
-     --data-dir ./data
-   ```
+Imports every `relay_messages` row into `relay_v2_messages`, preserving status,
+attempts and idempotency keys. Start the Node broker on a **new** port first, run
+`node setup/doctor.mjs` plus a `v2 send`/`pull`/`ack` round trip, then repoint the
+members and move to 19121.
 
-   (requires Node ≥ 22.13 for built-in SQLite; imports every `relay_messages`
-   row into `relay-v2.db` preserving state, attempts, idempotency.)
+## 9. Upgrading
 
-3. **Start the Node broker on the new port** and validate with
-   `node setup/setup.js selfcheck` plus a `v2 send/pull/ack` round trip.
-
-4. **Point each agent at the new port** — set the relay endpoint to
-   `http://127.0.0.1:19122` (for the dsh plugin, either
-   `~/.dsh/agent-relay.json` `endpoint` or the `DSH_RELAY_BROKER_URL` env), and
-   for standalone codex/claude agents run
-   `node adapters/relay-agent.mjs --agent <name> --broker http://127.0.0.1:19122 ...`.
-
-5. **Smoke-test the whole circle**: every agent can send/receive; `agent_relay_peers`
-   shows all members online; a write request reaches an allowed target.
-
-6. **Cut over**: stop the self-use Python broker on 19121, change the Node
-   broker port back to 19121 (or repoint clients), and remove the old
-   `~/.dsh/agent-relay*.json` receipts if you want a clean slate.
-
-7. **Retire** the self-use `relay/` package and the custom plugin code once the
-   circle has run clean for 24 h — their capabilities now live in this repo.
+Wire-protocol changes bump `PROTOCOL_VERSION` in [PROTOCOL-V2.md](PROTOCOL-V2.md);
+the broker and every client negotiate it and fail loudly on a mismatch instead of
+degrading silently. Config-shape changes get an "Upgrade notes" entry in
+[CHANGELOG.md](../CHANGELOG.md).

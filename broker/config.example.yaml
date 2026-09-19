@@ -3,11 +3,9 @@
 # NEVER commit config.yaml — it contains your shared secret.
 
 broker:
-  host: 127.0.0.1          # loopback by default; use 0.0.0.0 only behind TLS
+  host: 127.0.0.1          # loopback only — the broker is not a network service
   port: 19121
   secret: CHANGE_ME_RUN_SETUP_INIT
-  rateLimitLoopback: 600   # relaxed on loopback
-  rateLimitRemote: 120     # strict for non-loopback clients (remote mode)
   messageTtlDays: 7        # unread messages are kept this long
   persist: true            # persistence (survives restarts)
   storage: sqlite          # the only engine; requires Node >= 22.13 (built-in SQLite)
@@ -22,14 +20,12 @@ broker:
                            # sweep — it does not wait for someone to poll.
 
 security:
-  lockAfterFailures: 5     # consecutive auth failures before locking
-  lockMinutes: 5           # lock duration
   # admin_agents: [ops]    # may requeue/cancel ANY message (others only their
                           # own side: recipient requeues, originator cancels)
 
 # Optional v2 per-mode routing ACL. An agent with an entry may only send to
 # the targets in its mode's whitelist; write is opt-in (empty = closed).
-# Agents without an entry may send to anyone (v1-compatible default).
+# A member with no entry may send read/continue to anyone; write stays closed.
 # v3 clients (X-Agent-Relay-Key-Id header) verify against a keyring; the
 # implicit `legacy` key is the agent's single secret, so one config serves
 # both protocol generations.

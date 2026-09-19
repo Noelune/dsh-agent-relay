@@ -2,65 +2,100 @@
 
 ## Threat model
 
+The broker is a **loopback** service for agents on one machine. Everything below
+is judged against that boundary; a listener reachable from a network is a
+different system and this design does not secure it.
+
 In scope:
 
-- **Local forgery** — another local process (or user) forging messages between
-  your agents. Mitigated by HMAC-SHA256 signatures with a shared secret.
-- **Replay** — an attacker re-sending a captured request. Mitigated by the
-  `X-Relay-Timestamp` window (±300 s) and message-id idempotency.
-- **Brute force** — guessing the shared secret over HTTP. Mitigated by per-agent
-  lockout (5 consecutive failures → 5 minute lock) and per-IP rate limits.
-- **Eavesdropping on remote deployments** — mitigated ONLY by TLS. HMAC does
-  not encrypt; a public plaintext broker leaks message content by design.
+- **Local forgery** — another local process (or user) sending messages as one of
+  your agents. Mitigated by HMAC-SHA256 over the method, path, timestamp and
+  canonical body digest, with a per-agent secret (or a shared one). A sender also
+  has to name a target its ACL allows.
+- **Replay** — re-sending a captured request. Mitigated by the ±300 s
+  `X-Agent-Relay-Timestamp` window, and by delivery credentials: each claim
+  issues a fresh `lease_token` that only the claiming recipient may present, and
+  only while its lease is live.
+- **Duplicate processing** — a retry after a lost ack delivering twice. Delivery
+  is at-least-once by design; `(origin, idempotency_key)` dedups resends, and the
+  token rule means a stale ack cannot move a message that has already moved on.
 
-Out of scope (by design):
+Explicitly **not** in place, so nobody mistakes a config key for a control:
 
-- **Malicious peer content** — relay messages are data, not instructions.
-  Every adapter must treat incoming bodies as untrusted input.
-- **Compromise of a machine holding the secret** — the secret grants full
-  access to the relay; protect it like a password.
+- **No rate limiting and no auth-failure lockout.** `broker.rateLimit*` and
+  `security.lock*` were v1 features and were removed with the v1 generation
+  (`broker/src/auth.js`); old config files still load with those keys ignored.
+  The control that exists instead is the bind address.
+- **No encryption.** HMAC authenticates, it does not conceal. `broker.tls` is
+  rejected at startup, and binding `0.0.0.0` is unsupported — if a circle ever
+  spans machines, terminate TLS at a real reverse proxy and treat the broker as
+  loopback-only behind it.
+- **No content inspection.** Relay messages are data, not instructions. Every
+  adapter must treat an incoming body as untrusted input, including one that
+  arrives signed.
+- **No defence against a compromised account.** A process running as your user
+  can read `config.yaml`, the dotenv, and the queue file. Protect the secret like
+  a password, because it is one.
 
 ## Secret management
 
-- Generated locally by `setup.js init` (`crypto.randomBytes(32)`).
-- Stored in `broker/config.yaml` — gitignored; never commit.
-- Agents read it from environment variables (`DSH_RELAY_SECRET`,
-  `RELAY_SECRET`) or their own config stores.
-- Rotate by regenerating and updating every agent.
-- Remote deployments: distribute out-of-band; consider per-agent secrets in a
-  future protocol version.
+- Generated locally (`crypto.randomBytes(32)`) by `node setup/setup.js init`.
+- Stored in `broker/config.yaml`, which is gitignored — never commit it.
+- Members resolve a credential in this order: inline setting → `AGENT_RELAY_SECRET`
+  / `DSH_RELAY_SECRET` → `secret_env_file`, which reads
+  `AGENT_RELAY_<NAME>_SECRET` from a dotenv the deployment **already** has →
+  `secret_ref` + `vault_module`, which asks an external vault (on this machine:
+  a DPAPI-protected store) for one named entry. The point of the last two is that
+  joining a circle never requires writing the secret into a new plaintext file.
+- Per-agent secrets and a v3 keyring (`agents.<name>.keys.<id>.{secret,not_after}`)
+  allow rotation and revocation without touching other members; the implicit
+  `legacy` key is the agent's single secret, so one config serves both signature
+  generations.
+- `add-member.mjs`, `sync-secrets.mjs`, `doctor.mjs` and the CLI report *where* a
+  credential came from and whether two stores agree. None of them ever prints a
+  value.
 
 ## Network
 
-- Default bind: `127.0.0.1` only.
-- Remote mode: `host: 0.0.0.0` requires TLS termination in front (see
-  DEPLOY.md Mode B). The README and DEPLOY.md both state this explicitly.
-- Rate limits: 600 req/min on loopback, 120 req/min otherwise (configurable).
+- Default bind `127.0.0.1:19121`. Requests from a non-loopback peer are accepted
+  only if the operator deliberately reconfigured the host, which this guide does
+  not recommend.
+- The published port on a container must be bound to loopback
+  (`-p 127.0.0.1:19121:19121`).
 
 ## Application-level guards
 
-- `POST /messages` validates: `to` required, `from` must match the auth
-  header, self-send rejected, target must be a configured member.
-- Body size cap: 1 MB per request.
-- Message TTL: 7 days (configurable); expired messages are dropped.
-- No content logging: broker logs events and ids only; the dsh plugin keeps an
-  in-memory id-level history; CLI/Python clients print only what you ask them
-  to print.
+- A request without `X-Agent-Relay-*` headers is refused with `400` and a pointer
+  to the protocol doc — there is no unauthenticated route except `GET /healthz`.
+- Body cap 1 MiB per request; message and context length limits in characters,
+  enforced against code points, not UTF-16 units.
+- Per-mode routing ACL (`allowed_read_targets`, `allowed_continue_targets`,
+  `allowed_write_targets`). A member with no entry may send read/continue to
+  anyone; **write is closed unless explicitly granted**, and replies never carry
+  write privileges.
+- `requeue` is for the recipient, `cancel` for the originator, and only
+  `security.admin_agents` may act on somebody else's message.
+- Retention: an unclaimed request lives `broker.messageTtlDays` (7 days by
+  default, `ttl_seconds` clamped to 60 s … 30 days); terminal rows are purged
+  after 30 days, and with them their idempotency entry.
+- No content logging: the broker logs ids and outcomes, never bodies. The dsh
+  plugin keeps an in-memory id-level history; the CLI prints only what you ask.
 - Constant-time signature comparison (`timingSafeEqual`).
 
-## Routing ACL
+## `wake_command` is the sharpest edge
 
-- Optional per-agent send whitelists: `agents.<name>.allowed_targets` in
-  `broker/config.yaml`. A sender with an `allowed_targets` list may only send
-  to those recipients (else `403 forbidden`).
-- An agent without an entry may send read/continue to anyone — add ACL entries
-  to tighten a shared broker.
-- Lease-based delivery (`/v1/pull`, `/v1/ack`) adds replay protection at the
-  message level: a pulled message is leased to one recipient and only they may
-  ack it (`403` otherwise).
+To make an offline member reachable, the broker runs a configured command. That
+means **anything a member's `wake_command` names is executed as the broker's
+user** the moment someone sends it a message. Treat `config.yaml` accordingly:
+file-system permissions on it are the authorization check, and it should never be
+writable by another account or generated from untrusted input. Two constraints
+limit the blast radius: the command template comes from the config, not from a
+request, and the credential is handed to the child through its **environment**,
+never on the command line, because argv is readable by every process on the box.
 
 ## Reporting
 
-This is a community-maintained project. For security issues, open a GitHub
-issue (or, for sensitive details, contact the maintainers via the repository)
-— critical vulnerabilities get priority attention.
+Open a GitHub issue (or, for sensitive details, contact the maintainers through
+the repository). Anything that lets one member act as another, read another
+member's messages, or reach `wake_command` without the config is treated as a
+security bug, not a design property.

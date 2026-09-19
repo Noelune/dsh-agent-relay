@@ -1,144 +1,76 @@
-# dsh-agent-relay — DSH 自主部署任务书
+# dsh-agent-relay — Agent 自主部署任务书
 
-> **本文档是给 DSH（DeepSeek Harness）的部署 prompt，不是给人看的教程。**
-> 首次安装 `dsh-agent-relay` 插件后，DSH 必须完整阅读本文档，并**亲自完成部署操作**。
-> 部署采用 Agent 驱动方式：由你（DSH）完成 broker 初始化、启动、Agent 接入与验证。不要依赖"复制粘贴"的手动流程，也不要让用户自己敲命令。
-
----
-
-## 0. 你的角色与任务
-
-你是**部署执行者**。任务：把多 Agent 协作中继（dsh-agent-relay）部署到本机，让各 Agent（dsh / Codex / Claude / Hermes / 其他）能经 broker 安全互发消息。
-
-- 你负责：初始化配置与密钥、启动 broker、接入各 Agent、验证闭环。
-- 只动与 relay 相关的文件与配置；不改动各 Agent 的其他配置、会话历史、技能文件。
-- 完成标准见第 3 节验证清单，全部满足才算完成。
+> **这份文档是给执行部署的 Agent（DSH / Codex / Claude / Qoder 等）读的 prompt，不是给人看的教程。**
+> 人类读者请直接看 [DEPLOY.md](DEPLOY.md)；这里只额外提供三样东西：决策点、完成标准（DoD）、汇报格式。
+> 你要亲自完成 broker 初始化、启动、成员接入与验证，并把结果整理成第 4 节的报告。不要让用户替你敲命令。
 
 ---
 
-## 1. 前置信息（先解析，禁止猜测）
+## 0. 角色与边界
 
-### 1.1 两种部署模式
+把多 Agent 协作中继部署到本机，让各成员经 broker 安全互发消息。
 
-| 模式 | 适用 | 说明 |
+- 你负责：初始化配置与密钥、启动 broker、接入成员、开启按需唤醒、验证闭环。
+- 只动与 relay 相关的文件与配置；不碰各 Agent 的其他配置、会话历史、技能文件。
+- 拓扑只有一种：broker 与全部成员同机、走回环。不要试图改 `host: 0.0.0.0` 或把它搬到公网。
+- 完成标准见第 3 节，全部满足才算完成；任何一项做不到就在汇报里明写，不要绕过或降级完成。
+
+## 1. 决策点（能从环境推断就用默认，不能推断才问用户，一次问完）
+
+| 决策 | 默认 | 说明 |
 |---|---|---|
-| **单机（默认）** | 本机多 Agent | broker 与 Agent 同机，全回环 `127.0.0.1:19121`，零网络暴露 |
-| **分布式（进阶）** | 多台机器 | 一台服务器 + 各机器 Agent；**必须 TLS**，secret 分发要谨慎 |
+| 接入哪些成员 | 只接已检测到的 | 检测不到的不接，别替用户发明名字 |
+| 端口 | `127.0.0.1:19121` | 被占用就改 `broker.port`，并同步各成员 endpoint |
+| 是否开启按需唤醒 | 逐成员确认 | 只有 `wake_command` 列出的成员能在无人轮询时收信 |
+| 凭据落点 | 复用部署已有的 dotenv / DPAPI 保管库 | 不要为便利新写一份明文密钥 |
 
-### 1.2 部署决策（能从环境推断就用默认，不能推断才向用户确认，一次问完）
+## 2. 流程（一步一验，命令与解释都在 DEPLOY.md）
 
-1. **模式**：默认单机回环；用户要跨机器才选分布式。
-2. **broker host/port**：默认 `127.0.0.1:19121`；改端口只需改 `broker/config.yaml`。
-3. **接入哪些 Agent**：默认接入已检测到的（dsh 插件 / CLI 客户端 / Python 客户端），检测不到的不接。
+1. **就位检查**：`broker/src/index.js`、`setup/setup.js`、`lib/index.js`、`adapters/cli/relay.mjs` 存在；缺文件说明包不完整，换 `git clone https://github.com/Noelune/dsh-agent-relay.git` 重来。Node 必须 ≥ 22.13。
+2. **初始化与启动**：DEPLOY.md 第 2 节（`setup.js init` → `setup.js start` → `setup/doctor.mjs`）。已有 `config.yaml` 就复用其中的密钥，保持幂等。
+3. **接成员**：DEPLOY.md 第 3 节（`add-member.mjs` 一次写全三处；改完重启 broker；用 `sync-secrets.mjs` 校漂移）。成员的接入面按宿主能力选 MCP / CLI / Python，三者都不需要常驻轮询进程。
+4. **让离线成员可投递**：DEPLOY.md 第 4 节（`enable-wake.mjs --agent <name>` 先干跑，确认后加 `--apply`）。
+5. **验证闭环**：DEPLOY.md 第 5 节。至少做一次 `v2 send` → `v2 pull` → `v2 ack completed` → `v2 status`，并确认 send 响应里的 `target_online` / `will_wake` 与实际一致。
+6. **收尾**：再跑一次 `node setup/doctor.mjs`，把它的每一行原样纳入第 4 节的汇报。
 
-### 1.3 可用组件（npm 包已自带全部，无需 git clone）
+## 3. Definition of Done
 
-| 组件 | 位置 | 用途 |
-|---|---|---|
-| broker | `<包目录>/broker/` | 零依赖 Node 中继服务（v2/v3 签名认证 / SQLite 队列 / HTTP 服务） |
-| setup | `<包目录>/setup/` | `setup.js`：`init`（生成密钥+配置）/ `start`（启动）/ `selfcheck`（验证） |
-| dsh 插件 | `<包目录>/lib/` | `relay_send` / `relay_recv` / `relay_peers` / `relay_history` 模型工具 |
-| CLI 客户端 | `<包目录>/adapters/cli/relay.mjs` | 脚本 / Codex / Claude 包装用 |
-| Python 客户端 | `<包目录>/adapters/hermes/relay_client.py` | 纯标准库，Hermes 风格接入 |
+- [ ] `config.yaml` 存在、含 ≥32 位随机 secret，且未被纳入版本控制；日志与汇报里不出现密钥明文。
+- [ ] broker 在 `127.0.0.1:19121`（或用户指定的端口）监听，`doctor` 无 fail 项。
+- [ ] 每个已接入成员都能被 `doctor` 看到；在线判据是「90 秒内取过件」，不是「注册过」。
+- [ ] 一条消息端到端投递成功：`send` 返回 `created: true` → 接收方 `pull` 拿到 → `ack completed` → `status` 显示 `completed`。
+- [ ] 重试与租约语义验证过：`ack retry` 会 attempts+1 并重新入队，达到 `maxAttempts` 变 `failed`；带 `lease_token` 的 ack 才生效。
+- [ ] 对「无人轮询的成员」：要么开了 `wake_command`（`will_wake: true` 可证），要么在汇报里明确写出它当前收不到信。
+- [ ] 未确认请求默认留存 7 天（`ttl_seconds` 可 60 秒～30 天），终态消息 30 天后清除；消息正文只存在于 broker 投递队列，不落应用日志。
 
-> **路径注意**：`<包目录>` = 你（DSH）能找到本插件包的位置。若是 npm 安装，通常在
-> `<profile>/node_modules/dsh-agent-relay/`；若是 git clone，就是仓库根目录。用实际解析结果，不要假设。
-
----
-
-## 2. 部署流程（按顺序执行，一步一验）
-
-### Step 0 读任务书、定模式
-- 完整读完本文档。
-- 确认模式（1.2）：单机回环（默认）还是分布式。
-- 记录 `<包目录>` 与决定。
-
-### Step 1 确认组件就位
-- 检查 `<包目录>/broker/src/index.js`、`<包目录>/setup/setup.js`、`<包目录>/lib/index.js` 存在。
-- 缺失 → 说明包不完整，改用 `git clone https://github.com/Noelune/dsh-agent-relay.git` 后重试。
-
-### Step 2 生成配置与密钥
-- 运行 `node <包目录>/setup/setup.js init`。
-- 生成 `broker/config.yaml`，内含一个随机 64-hex 密钥。**绝不提交、不外泄、不写入任何日志**。
-- 若已存在 config.yaml：保留，直接复用其中的 secret（幂等）。
-
-### Step 3 启动 broker
-- 前台启动：`node <包目录>/setup/setup.js start`（会按 config.yaml 绑定）。
-- 或后台/容器：见 `docs/DEPLOY.md` 的 Docker 小节。
-- 启动后验证：`node <包目录>/setup/setup.js selfcheck` → `all checks passed`。
-- **单机模式**：确认 broker 绑定 `127.0.0.1`（config.yaml `host: 127.0.0.1`），不要改成 `0.0.0.0` 除非后面有 TLS。
-
-### Step 4 接入 Agent
-- **dsh（插件）**：
-  - `dsh plugin --profile web add dsh-agent-relay`
-  - 配置共享密钥：`DSH_RELAY_SECRET=<config.yaml 里的 secret>`（环境变量或插件设置），以及稳定的 `DSH_RELAY_AGENT=<名字>`。
-- **CLI 客户端**（脚本 / Codex / Claude 包装）：
-  - `node adapters/cli/relay.mjs register --agent alpha --secret <secret>`
-  - 用 `peers` 确认上线。
-- **Python 客户端**（Hermes 风格）：
-  - `from relay_client import RelayClient; client = RelayClient(broker_url="http://127.0.0.1:19121", agent="beta", secret="<secret>"); client.register()`
-- 每个接入的 Agent 名字要**稳定唯一**；重启后重新 `register`（心跳续期）。
-
-### Step 5 验证闭环
-- `node <包目录>/setup/setup.js selfcheck` → `all checks passed`。
-- 端到端：两个 Agent 互发一条消息，接收方 `recv` 能取到（`node adapters/cli/relay.mjs send <b> "hello" --agent <a> --secret <s>`，再 `recv`）。
-- 若接了 dsh 插件：确认 `relay_peers` 工具能看到已注册 Agent。
-
-### Step 6 汇报
-按第 4 节格式输出部署报告。
-
----
-
-## 3. 验证清单（Definition of Done，全部满足才算完成）
-
-- [ ] `broker/config.yaml` 存在，含 ≥32 位随机 secret，且未被纳入版本控制。
-- [ ] broker 启动，`selfcheck` 全部 ok（config 有效 / broker 可达 / 插件模块加载）。
-- [ ] 至少两个 Agent 注册成功，`peers` 能看到它们。
-- [ ] 一条消息端到端送达（发送方收到 `accepted:true`，接收方 `recv` 取到）。
-- [ ] （租约投递）接收方用 `pull` 取到消息 → 处理完成后 `ack` `completed` → 状态变 `done`；`retry` 会 attempts+1 并重新入队。
-- [ ] 单机模式 broker 绑定回环地址；未向公网暴露明文端口。
-- [ ] 未在任何日志、配置、汇报中出现 secret 明文以外的敏感信息。
-- [ ] 消息内容仅存于 broker 的投递队列（SQLite，请求默认留存 7 天），绝不写入应用日志；插件只记内存 id 级历史。
-
----
-
-## 4. 汇报格式（部署完成后输出）
+## 4. 汇报格式
 
 ```
 ## 部署完成报告
 
-**模式**：单机回环 / 分布式
-**broker**：<host>:<port>（config.yaml 路径）
-**密钥**：已生成/复用（长度 <N> hex，绝不回显）
+**broker**：127.0.0.1:<port>（config 路径）· 协议 v<N> · 存储 sqlite
+**密钥**：已生成 / 复用（<N> hex，不回显）· 落点：dotenv / DPAPI 保管库条目 <label>
 
-| Agent | 接入方式 | 注册名 | 验证 |
-|---|---|---|---|
-| dsh | 插件 | <agent> | ✅/❌ |
-| CLI | adapters/cli | alpha | ✅/❌ |
-| Python | adapters/hermes | beta | ✅/❌ |
+| 成员 | 接入面 | 在线 | 可被唤醒 | 验证 |
+|---|---|---|---|---|
+| dsh | 插件 | ✅/❌ | ✅/❌ | send→pull→ack completed |
 
-**selfcheck**：全部 ok / 列出失败项
-**备注**：未满足的清单项、需要用户确认的事项（如分布式服务器、端口占用）、下一步（重启各 Agent 会话使插件生效）
+**doctor**：逐项列出（ok/warn/fail 与原因）
+**备注**：未满足的 DoD 项、需要用户决定的事项、下一步（例如重启各 Agent 会话让插件生效）
 ```
 
----
+## 5. 防坑清单
 
-## 5. 防坑清单（常见问题，执行前先过一遍）
-
-1. **密钥即凭据**：`broker/config.yaml` 含共享密钥，**绝不提交版本库、绝不进日志/汇报**。分布式部署用带外方式（密码管理器/密封信封）分发。
-2. **单机默认回环**：broker 默认 `127.0.0.1`。**绝不要把明文 broker 暴露到公网**——HMAC 只防伪造不防窃听。
-3. **分布式必须 TLS**：跨机器部署时，broker 保持回环绑定，用反向代理（nginx/Caddy）终结 HTTPS，再转发到 `127.0.0.1:19121`。
-4. **端口占用**：19121 被占用时报错——改 `broker/config.yaml` 的 `port`，并同步各 Agent 的 `DSH_RELAY_BROKER_URL`。
-5. **Agent 名字稳定唯一**：接入时用固定名字，避免每次随机。
-6. **幂等反复部署**：config.yaml 已存在时保留复用；重复 `register` 无害（心跳续期）。
-7. **Windows**：路径用 `C:/` 或 `C:\` 形式；Node ≥ 20；不要在 shell heredoc 里拼多行配置。
-8. **不碰无关配置**：各 Agent 的其他配置、会话历史、技能文件不在本任务范围。
-9. **无法满足的项**：任何一步遇到障碍（端口被占、权限不足、包不完整），停下来在汇报里说明，不要绕过或降级完成。
-
----
+1. **密钥即凭据**：不进版本库、不进日志、不进汇报；分发用带外方式。给成员配凭据时优先指向已有 dotenv 或保管库条目，别造第二份明文副本。
+2. **别把 broker 搬上公网**：回环是设计前提。`host: 0.0.0.0` 在这里不是「更开放」，是「没有 TLS 的假安全」。
+3. **名字要稳定**：成员身份就是它的名字（小写），每次换名等于换一个人，历史与幂等键都会错位。
+4. **端口占用**：改 `broker.port` 后必须同步所有成员的 endpoint，否则表现为「连得上但 401/超时」。
+5. **Windows**：路径用 `C:/` 或 `C:\` 形式；含中文的路径要整体加引号；不要在 heredoc 里拼多行配置。
+6. **验证要真做**：`doctor` 绿灯不等于投递闭环——至少跑一次真实 send→pull→ack，尤其是刚配 `wake_command` 的成员。
+7. **不碰无关配置**：各 Agent 的其他设置、会话历史、技能文件不在本任务范围内。
 
 ## 6. 与 unified-agent-memory 的关系
 
-dsh-agent-relay 只负责**消息中继**，不存记忆。共享记忆请用
-[unified-agent-memory](https://github.com/Noelune/unified-agent-memory)（Obsidian vault 为最高事实源）。
-两者可同时部署：relay 让 Agent 互发消息，unified-agent-memory 让它们共享事实。
+dsh-agent-relay 只负责**消息中继**，不存记忆。共享事实请用
+[unified-agent-memory](https://github.com/Noelune/unified-agent-memory)（Obsidian vault
+为最高事实源）。两者可同时部署：relay 让成员互发消息，unified-agent-memory 让它们共享事实。

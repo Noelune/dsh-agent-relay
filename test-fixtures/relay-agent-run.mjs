@@ -12,9 +12,8 @@ const DATA_DIR = process.cwd() + '/data'
 mkdirSync(DATA_DIR, { recursive: true })
 
 const config = {
-  host: '127.0.0.1', port: 0, secret: SHARED, tls: false,
-  rateLimitLoopback: 1e6, rateLimitRemote: 1e6, messageTtlDays: 7,
-  persist: false, dataDir: DATA_DIR, lockAfterFailures: 5, lockMinutes: 5,
+  host: '127.0.0.1', port: 0, secret: SHARED, tls: false, messageTtlDays: 7,
+  persist: false, dataDir: DATA_DIR,
   leaseSeconds: 600, maxAttempts: 3, notifyFailedToSender: true, agents: {},
 }
 const v2Store = createV2Store({ dataDir: DATA_DIR, persist: false, leaseSeconds: 600, maxAttempts: 3 })

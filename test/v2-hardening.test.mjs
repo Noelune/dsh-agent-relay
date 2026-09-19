@@ -53,10 +53,8 @@ async function sendRequest(from, to, key) {
 
 before(async () => {
   const config = {
-    host: '127.0.0.1', port: 0, secret: SHARED,
-    rateLimitLoopback: 100000, rateLimitRemote: 100000, messageTtlDays: 7,
-    persist: false, dataDir: DATA_DIR,
-    lockAfterFailures: 5, lockMinutes: 5, agents: {},
+    host: '127.0.0.1', port: 0, secret: SHARED, messageTtlDays: 7,
+    persist: false, dataDir: DATA_DIR, agents: {},
   }
   server = createBrokerServer({ config })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))

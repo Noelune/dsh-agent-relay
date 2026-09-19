@@ -1,16 +1,18 @@
-# dsh-agent-relay Wire Protocol v2
+# dsh-agent-relay Wire Protocol v2/v3
 
-> **Normative reference for the v2 wire format.** This format is **byte-for-byte
+> **Normative reference for the wire format.** This format is **byte-for-byte
 > compatible** with the self-use Python broker (`relay/protocol.py`). The Node
-> broker (`broker/src/protocol.js`) is the reference implementation; the
-> cross-language golden check (`test/protocol_v2_golden.py` + `test/protocol-v2.test.mjs`)
-> locks the canonical bytes and signatures so both implementations can never
-> drift. The legacy v1 (camelCase) format is documented in `PROTOCOL.md`.
+> broker (`lib/protocol.js`, re-exported by `broker/src/protocol.js`) is the
+> reference implementation; the cross-language golden check
+> (`test/protocol_v2_golden.py` + `test/protocol-v2.test.mjs`) locks the canonical
+> bytes and signatures so both implementations can never drift. The legacy v1
+> (camelCase) generation was removed in 0.7.0 — its documents and clients went
+> with it, and a v1-shaped request is refused with `400`.
 >
-> Versioning note: the wire format described here is called **v2** and reported
-> as `protocol_version: 2` from `GET /healthz`. The self-use broker internally
-> labels the same wire format version `1`; the version *number* is
-> informational (no shipped client gates on it) — what matters is that the
+> Two signature schemes are served side by side (§3): **v2** signs with the
+> agent's single secret, **v3** additionally names a key id so secrets can be
+> rotated. `GET /healthz` reports `protocol_version: 3` and
+> `signature_schemes: ["v2", "v3"]`. What matters across languages is that the
 > **bytes are identical**.
 
 ---
@@ -21,9 +23,9 @@
 - All request/response bodies are JSON (`application/json; charset=utf-8`).
 - Paths are matched on the URL **pathname**; the **pathname (with query string) is
   part of the signed data** (see §3).
-- Maximum request body: **48 000 characters** (`MAX_BODY_CHARS`), enforced on the
-  `body`/`context` fields; the HTTP body itself is bounded by the server at
-  `MAX_BODY_CHARS * 3` bytes.
+- Maximum HTTP request body: **1 MiB** (`MAX_BODY_BYTES`, `broker/src/http-utils.js`).
+  Inside it, `body` and `context` are each capped at **48 000 characters**
+  (`MAX_BODY_CHARS`), counted in Unicode code points rather than UTF-16 units.
 - Message content is never logged by the broker — ids and events only.
 
 ## 2. Message envelope
@@ -43,6 +45,7 @@ Every v2 message is a JSON object with exactly these fields (snake_case):
 | `created_at` | number (epoch s) | auto | Broker-set creation time. |
 | `expires_at` | number (epoch s) | auto | `created_at + ttl`; the message is expired after this. |
 | `execution_mode` | `"read"` \| `"continue"` \| `"write"` | no | Default `"read"`. Replies inherit the request's mode. |
+| `allow_shared_write` | boolean | no | Requests only, and forwarded as declared: the sender says the recipient may act on the **shared** working copy instead of an isolated one. The broker stores and delivers it; honouring it is the recipient's job (the self-use Python agent does). Stripped from replies, so it never travels back. |
 | `context` | string | no | Optional structured context the peer may need (project path, constraints, memory excerpt); treated as untrusted data. |
 | `topic` | string | no | Optional collaboration topic (≤200 chars) so a request/reply tree is searchable by subject; replies inherit it. |
 
@@ -76,8 +79,11 @@ The **canonical body bytes are what is sent on the wire** — the client MUST
 serialize the payload with §4 canonicalization, sign those exact bytes, and send
 those exact bytes. The server verifies against the raw bytes it received.
 
-Verify with a **constant-time comparison**. Reject with `401` on:
-- missing/empty headers,
+Verify with a **constant-time comparison**. A request with **no
+`X-Agent-Relay-*` headers at all** is refused earlier, in dispatch, with `400`
+and a pointer to this document — that is what an obsolete v1 client now gets.
+Once the headers are present, reject with `401` on:
+- an empty agent, timestamp or signature header,
 - timestamp skew > **300 seconds**,
 - signature mismatch,
 - unknown agent (when per-agent secrets are configured).
@@ -162,7 +168,7 @@ With `agent=test-agent`, `secret=s3cret`, `method=POST`, `path=/v1/messages`,
   "ok": true,
   "protocol_version": 3,
   "broker": "dsh-agent-relay",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "storage": "sqlite",
   "signature_schemes": ["v2", "v3"],
   "long_poll": { "max_wait_seconds": 120, "held": 1 },
@@ -177,8 +183,8 @@ With `agent=test-agent`, `secret=s3cret`, `method=POST`, `path=/v1/messages`,
 `protocol_version` 3 reports the bilingual broker (v2 signatures accepted
 alongside v3, see §3.1). `queues` additionally includes `oldest_queued_at`
 per agent. `presence` is derived from real claim activity — it is the only
-liveness signal v2 clients produce, because none of them call the legacy v1
-`/register` heartbeat. `online` means "claimed within 90 s".
+liveness signal v2 clients produce, because none of them ever called the legacy
+v1 heartbeat that used to sit here. `online` means "claimed within 90 s".
 
 ### `POST /v1/messages` — create a message (auth)
 
@@ -194,17 +200,18 @@ Body: a v2 envelope subset (§2). Rules:
 - **request**: `execution_mode` must be `read|continue|write`; the target must
   be allowed by the sender's **per-mode ACL** for that mode (see §5.1). Write is
   closed by default (`allowed_write_targets` empty). A fresh `root_id` is
-  generated, or the caller may supply its own (that is how `ask()` later claims
-  the answer by conversation — see §3 of the MCP tools).
+  generated, or the caller may supply its own — that is how `ask()` later claims
+  exactly the answer with `match_root_id` (see §5.2).
 - **reply**: `parent_id` is required; the parent must exist (`404` if not) and
   the reply's `(origin, target)` must match the parent's `(target, origin)`
   (`403` otherwise). `root_id`, `session_ref`, `execution_mode`, `topic` are
   inherited from the parent.
 - **Idempotency**: a repeated `(origin, idempotency_key)` returns the original
   `message_id` with `created: false`.
-- **On-demand delivery**: if the target is not currently holding a pull and it
-  has an `agents.<name>.wake_command` configured, the broker starts it once
-  (see §5.3).
+- **On-demand delivery**: when nothing is holding a pull for the target *and* it
+  has claimed nothing in the last 90 s, an `agents.<name>.wake_command` is
+  started once (see §5.3). The presence gate is what keeps a woken worker from
+  competing with a resident poller for the same message.
 
 Response (HTTP 200) — presence is reported on every accepted send so the caller
 learns immediately whether anybody is listening, instead of an hour later:
@@ -213,7 +220,7 @@ learns immediately whether anybody is listening, instead of an hour later:
 {
   "message_id": "9f2c1a...", "created": true, "root_id": "7ab4...",
   "protocol_version": 3,
-  "target_online": false, "last_seen_at": null,
+  "target_online": false, "last_seen_at": null, "will_wake": true,
   "hint": "目标 codex 自 未连接过 未取件，消息已留存 168 小时等待投递…"
 }
 ```
@@ -266,12 +273,16 @@ body**. `since` is a `created_at` cutoff (epoch seconds).
 
 ### Admin helpers (authenticated parties only)
 
-- `POST /v1/admin/requeue` — `{ "message_id" }`; revives a `leased`/`failed`/`expired`
-  message to `queued` (resets `attempts`). `404` if not requeue-able. Only the
-  originator or the recipient of the message may call this (`403` otherwise).
-- `POST /v1/admin/cancel` — `{ "message_id" }`; marks a non-terminal message
-  `completed` so it is never delivered. `404` if not cancellable. Only the
-  originator or the recipient of the message may call this (`403` otherwise).
+- `POST /v1/admin/requeue` — `{ "message_id" }`. **The receiving agent** may
+  requeue its own unfinished `request` (a `leased`/`failed`/`expired` message goes
+  back to `queued` with `attempts` reset); anyone else gets `403`, a missing id
+  `404`, and a message in no requeue-able state `404`. Requeueing also wakes the
+  recipient, so a revived message does not wait for the next poll period.
+- `POST /v1/admin/cancel` — `{ "message_id" }`. **The originating agent** may
+  cancel its own `request` (it becomes `completed` and is never delivered);
+  `403` / `404` as above.
+- Members listed in `security.admin_agents` may do either to **any** message; the
+  rules above are what everybody else is held to.
 - `POST /v1/admin/status` — `{ "agent"?, "limit"? }`; lists non-terminal messages
   targeting the agent (`queued`/`leased`/`failed`/`expired`, last 7 days) with a
   `body_preview`, so an operator can decide what to requeue/cancel.
@@ -291,7 +302,8 @@ agents:
     allowed_write_targets: []            # write is OPT-IN; empty = closed
 ```
 
-- An agent **without** a config entry may send to anyone (v1-compatible default).
+- An agent **without** a config entry may send read/continue to anyone (the
+  permissive default inherited from the self-use broker).
 - An agent **with** an entry is restricted to the whitelist for the requested
   mode; write is closed unless explicitly granted.
 - `POST /v1/messages` returns `403` when the target is not allowed for the mode.
@@ -317,8 +329,8 @@ machine that assumption fails constantly: at audit time 4 of 6 circle members ha
 no poller alive, so anything sent to them was doomed.
 
 A member may therefore declare `agents.<name>.wake_command`. When a message is
-created for a member that holds **no** open pull, the broker starts that command
-once:
+created for a member that holds **no** open pull **and** has claimed nothing in
+the last 90 s, the broker starts that command once:
 
 - one in-flight wake per agent (a second message while it runs does not stack);
 - placeholders `{agent}`, `{message_id}`, `{root_id}` are expanded in the command;
@@ -336,10 +348,11 @@ Uniform body: `{ "error": { "code": "<machine_code>", "message": "<human>" } }`
 
 | HTTP | `code` | Meaning |
 |---|---|---|
-| 400 | `bad_request` | Malformed body, invalid kind, missing body/idempotency key, invalid execution_mode, invalid limit/lease/since |
-| 401 | `unauthenticated` / `unknown_agent` | Missing/invalid v2 signature, timestamp skew, unknown agent |
-| 403 | `forbidden` | `origin` mismatch, per-mode ACL denies the target, reply not authorized, agent mismatch, ack by non-recipient |
-| 404 | `no_such_message` | Reply parent not found, requeue/cancel on a non-eligible message |
+| 400 | `bad_request` | Malformed body, invalid kind, missing body/idempotency key, invalid execution_mode, invalid limit/lease/since — **and any request with no `X-Agent-Relay-*` headers at all**, which is what an obsolete v1 client now gets |
+| 401 | `unauthenticated` / `unknown_agent` / `unknown_key` | Empty credential headers, timestamp skew, signature mismatch, unknown agent, or a key id that is unknown or past its `not_after` |
+| 403 | `forbidden` | `origin` mismatch, per-mode ACL denies the target, reply not authorized, agent mismatch, ack/requeue/cancel by a party that is not the recipient/originator |
+| 404 | `no_such_message` / `not_found` | Reply parent not found, requeue/cancel on a message in no eligible state, unknown route |
+| 409 | `lease_mismatch` | A `lease_token` that no longer matches an active lease: ack or renew after the lease expired, was re-claimed, or never existed |
 
 ## 7. State machine & lifecycle
 
@@ -361,14 +374,21 @@ failed / expired →(admin requeue) queued
 
 ## 8. Clients
 
-- **JS** — `lib/client-v2.js` (`RelayClientV2`): `sendRequest`, `sendReply`,
-  `pull`, `ack`, `status`, `recent`, `query`, `requeue`, `cancel`, `adminStatus`,
-  `health`.
+- **JS** — `lib/client-v2.js` (`RelayClientV2`): `health`, `sendRequest`,
+  `sendRequestDetailed` (returns presence + `will_wake`), `sendReply`, `ask`
+  (hand off and wait for the matching reply, claiming by `root_id`), `pull`
+  (`limit`, `leaseSeconds`, `waitSeconds`, `matchRootId`), `ack`, `renewLease`,
+  `status`, `recent`, `query`, `requeue`, `cancel`, `adminStatus`.
 - **Python** — `adapters/hermes/relay_client_v2.py` (`RelayClientV2`, pure
   stdlib): the same surface, byte-compatible with the self-use `relay/client.py`.
-- **CLI** — `adapters/cli/relay.mjs` exposes `v2 <subcommand>` for every v2
-  endpoint (health / send / pull / ack / status / recent / query / requeue /
-  cancel).
+- **CLI** — `node adapters/cli/relay.mjs v2 <command>`: `health`, `ask`, `send`,
+  `pull` (`--wait` long-poll, `--root` targeted claim), `ack` (`--token`),
+  `status`, `recent`, `query`, `requeue`, `cancel`. Identity and credentials come
+  from the shared config layering (see `lib/relay-config.mjs`), so a deployed
+  member needs no flags. Exit codes: 0 ok, 2 bad usage, **3 peer unreachable**.
+- **MCP** — `mcp/relay-mcp.mjs` puts the same protocol in front of a host that
+  starts an agent per session: `relay_ask`, `relay_send`, `relay_inbox`,
+  `relay_status`, `relay_agents`.
 
-The legacy v1 clients (`lib/client.js`, `adapters/hermes/relay_client.py`, the
-v1 CLI commands) remain for v1 compatibility.
+There is no v1 client: `lib/client.js`, `adapters/hermes/relay_client.py` and the
+v1 command set were removed with the v1 generation in 0.7.0.

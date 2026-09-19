@@ -20,28 +20,7 @@
     "mcp",
     "docs",
     "cordis.patch.yml",
-    "README.md",
-    "README.zh.md"
-  ],
-  "scripts": {
-    "test": "node --test"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
-  },
-  "engines": {
-    "node": ">=22.13"
-  },
-  "keywords": [
-    "deepseek",
-    "harness",
-    "dsh",
-    "dsh-plugin",
-    "relay",
-    "agent",
-    "collaboration",
-    "multi-agent"
+    "README.md"
   ],
   "author": "Noelune",
   "license": "MIT",
