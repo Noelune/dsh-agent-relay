@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.8.1] — 2026-09-19
+
+Found by running the Qoder → Hermes pair end to end against the live broker rather
+than by reading the code.
+
+- **Python client errors now say what they are.** `RelayError` carried only the
+  broker's human message, so a caller could not distinguish `403` (the per-mode
+  ACL refuses that target) from `409` (the lease is gone) or `401` without
+  string-matching prose. It exposes `status` and the machine `code` like the JS
+  client does; `test/test_relay_client_v2.py` now asserts `409` /
+  `lease_mismatch` on a forged lease token instead of "raised something".
+- **`session_ref` is optional in `send_request` / `send_request_detailed`,**
+  matching the JS client. It was a required keyword argument, which made the
+  Python client stricter than the one it is supposed to be equivalent to.
+- **Measured, not promised:** a broker-held `wait_seconds` pull returned **~30 ms**
+  after the matching send committed. The protocol doc claimed "the instant a
+  message is created"; that is now a number.
+- `docs/ARCHITECTURE.md` / `SECURITY.md` state that the routing ACL gates
+  **requests only** — an answer is authorised by its parent — which is what makes
+  "exclude a member" a block on starting topics, not on replying to them.
+- Housekeeping: `.t1`, a scratch file carrying a (since-expired) lease token, was
+  committed by `git add -A` and has been removed from the tree. Content-wise it is
+  inert — a dead token cannot mutate a terminal row, which is the whole point of
+  the 409 path — but it should never have been tracked.
+
+Suite: 149 → 152 passing.
+
 ## [0.8.0] — 2026-09-19
 
 ### Changed — the store has one truth now
