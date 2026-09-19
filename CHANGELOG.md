@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.8.0] — 2026-09-19
 
 ### Changed — the store has one truth now
 
