@@ -72,7 +72,9 @@ Explicitly **not** in place, so nobody mistakes a config key for a control:
 - Per-mode routing ACL (`allowed_read_targets`, `allowed_continue_targets`,
   `allowed_write_targets`). A member with no entry may send read/continue to
   anyone; **write is closed unless explicitly granted**, and replies never carry
-  write privileges.
+  write privileges. The ACL covers *requests*: an answer is authorised by the
+  conversation it belongs to, so excluding a member blocks initiating traffic to
+  it without blocking your reply to theirs.
 - `requeue` is for the recipient, `cancel` for the originator, and only
   `security.admin_agents` may act on somebody else's message.
 - Retention: an unclaimed request lives `broker.messageTtlDays` (7 days by

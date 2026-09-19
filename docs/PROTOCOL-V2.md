@@ -307,6 +307,12 @@ agents:
 - An agent **with** an entry is restricted to the whitelist for the requested
   mode; write is closed unless explicitly granted.
 - `POST /v1/messages` returns `403` when the target is not allowed for the mode.
+- **The ACL gates requests only.** A `reply` is authorised by its parent instead —
+  its `(origin, target)` must mirror the parent's `(target, origin)` — so removing
+  a member from your list stops *new* requests to it but does not stop you from
+  answering one it sent you. (Verified live: with `zcode` removed from every
+  member's list, `qoder → zcode` requests get `403` while replies to zcode's own
+  requests still arrive and settle.)
 
 ### 5.2 Undelivered notices
 
