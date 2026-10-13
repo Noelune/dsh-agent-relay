@@ -6,7 +6,23 @@ import { join } from 'node:path'
 import {
   relaySessionId, isRelaySessionId, normalizeMessage, buildInboundPrompt,
   extractReplyText, createJsonStore, RELAY_SESSION_PREFIX,
+  RELAY_SOURCE_KIND, relayMessageSource,
 } from '../lib/relay-plugin-core.js'
+
+// Session format v4 (dsh 0.2.x) refuses the retired `{ kind: 'plugin', plugin }`
+// source shape on BOTH the write and the read path, failing the whole turn with
+// `SessionFormatError: format v4 message requires a producer-owned source kind`.
+// Relay-authored messages must therefore carry a producer-owned kind.
+test('relayMessageSource is producer-owned (v4 refuses the retired plugin kind)', () => {
+  const source = relayMessageSource()
+  assert.equal(source.kind, RELAY_SOURCE_KIND)
+  assert.equal(source.kind, 'plugin:dsh-agent-relay')
+  assert.notEqual(source.kind, 'plugin')
+  assert.ok(source.kind.startsWith('plugin:'))
+  assert.equal(source.plugin, undefined, 'the retired plugin field must be gone')
+  // A fresh object each call, so callers cannot mutate shared state.
+  assert.notEqual(relayMessageSource(), source)
+})
 
 test('relaySessionId / isRelaySessionId', () => {
   assert.equal(relaySessionId('abc123'), 'agent-relay-abc123')
